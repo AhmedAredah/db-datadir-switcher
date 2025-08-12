@@ -834,6 +834,72 @@ func getMariaDBStatus() MariaDBStatus {
 	return status
 }
 
+// getMariaDBStatusWithUI gets MariaDB status and can prompt user for credentials if needed
+func getMariaDBStatusWithUI(parent fyne.Window, onComplete func(status MariaDBStatus)) {
+	status := MariaDBStatus{
+		IsRunning:  false,
+		ConfigFile: "",
+		ConfigName: "Unknown",
+		DataPath:   "Not found",
+		ProcessID:  0,
+	}
+
+	processName := config.ProcessNames[runtime.GOOS]
+	if processName == "" {
+		processName = "mysqld"
+	}
+
+	// Find running MariaDB process
+	pid, cmdLine, found := findProcessWithCmdLine(processName)
+	if found {
+		status.IsRunning = true
+		status.ProcessID = pid
+
+		// Try to extract config file from command line
+		if configFile := extractConfigFromCmdLine(cmdLine); configFile != "" {
+			status.ConfigFile = configFile
+			// Find matching config name
+			for _, cfg := range availableConfigs {
+				if cfg.Path == configFile {
+					status.ConfigName = cfg.Name
+					break
+				}
+			}
+		}
+
+		// Try to get version
+		status.Version = getMariaDBVersion()
+
+		// Query MariaDB for actual datadir and port using UI if needed
+		var pendingQueries = 2
+		var queryComplete = func() {
+			pendingQueries--
+			if pendingQueries == 0 {
+				onComplete(status)
+			}
+		}
+
+		// Query datadir
+		queryMariaDBVariableWithUI("datadir", parent, func(result string) {
+			if result != "" {
+				status.DataPath = result
+			}
+			queryComplete()
+		})
+
+		// Query port
+		queryMariaDBVariableWithUI("port", parent, func(result string) {
+			if result != "" {
+				status.Port = result
+			}
+			queryComplete()
+		})
+	} else {
+		// MariaDB not running, return status immediately
+		onComplete(status)
+	}
+}
+
 // Enhanced process detection that also gets command line
 func findProcessWithCmdLine(processName string) (int, string, bool) {
 	switch runtime.GOOS {
@@ -934,44 +1000,119 @@ func extractConfigFromCmdLine(cmdLine string) string {
 }
 
 func queryMariaDBVariable(variable string) string {
+	logger.Log("Querying MariaDB variable: %s", variable)
+	
+	// Try to load saved credentials from keyring if not already loaded
+	if savedCredentials == nil {
+		if creds, err := loadCredentialsFromKeyring(); err == nil && creds != nil {
+			savedCredentials = creds
+		}
+	}
+	
+	// Try with saved credentials first if available and valid
+	if savedCredentials != nil {
+		// Skip validation for password as it can be empty for some MySQL setups
+		if savedCredentials.Username != "" && savedCredentials.Host != "" {
+			logger.Log("Using saved credentials for variable query: %s", variable)
+			if result := execMySQLQueryWithCredentials(variable, *savedCredentials); result != "" {
+				return result
+			}
+			logger.Log("Saved credentials failed for variable query: %s", variable)
+		} else {
+			logger.Log("Saved credentials are incomplete for variable query: %s", variable)
+			savedCredentials = nil // Clear invalid credentials
+		}
+	}
+	
+	logger.Log("No valid saved credentials available for variable query: %s", variable)
+	return ""
+}
+
+// queryMariaDBVariableWithUI tries to query using credentials, prompting user if needed
+func queryMariaDBVariableWithUI(variable string, parent fyne.Window, onComplete func(result string)) {
+	logger.Log("Querying MariaDB variable with UI: %s", variable)
+	
+	// First try the synchronous version (with saved or default credentials)
+	if result := queryMariaDBVariable(variable); result != "" {
+		onComplete(result)
+		return
+	}
+	
+	// If that failed, show credential dialog
+	if parent != nil {
+		fyne.Do(func() {
+			showCredentialsDialog(parent, func(creds MySQLCredentials) {
+				// Set defaults if empty
+				if creds.Username == "" {
+					creds.Username = "root"
+				}
+				if creds.Host == "" {
+					creds.Host = "localhost"
+				}
+				if creds.Port == "" {
+					creds.Port = "3306"
+				}
+				
+				// Test credentials with the query
+				result := execMySQLQueryWithCredentials(variable, creds)
+				if result != "" {
+					// Save valid credentials for future use
+					savedCredentials = &creds
+					logger.Log("Successfully queried variable %s with provided credentials", variable)
+					onComplete(result)
+				} else {
+					logger.Log("Failed to query variable %s with provided credentials", variable)
+					onComplete("")
+				}
+			}, func() {
+				// User cancelled
+				logger.Log("User cancelled credential dialog for variable query: %s", variable)
+				onComplete("")
+			})
+		})
+	} else {
+		// No UI available, return empty
+		logger.Log("No UI available for credential prompt, returning empty for variable: %s", variable)
+		onComplete("")
+	}
+}
+
+// execMySQLQueryWithCredentials executes a MySQL query with provided credentials
+func execMySQLQueryWithCredentials(variable string, creds MySQLCredentials) string {
 	mysqlPath := filepath.Join(config.MariaDBBin, "mysql")
 	if runtime.GOOS == "windows" {
 		mysqlPath += ".exe"
 	}
-
+	
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	// Try without password first
-	cmd := exec.CommandContext(ctx, mysqlPath, "-u", "root", "--skip-password",
-		"-s", "-N", "-e", fmt.Sprintf("SELECT @@%s;", variable))
-	output, err := cmd.Output()
-	if err != nil {
-		// Try with socket for Unix systems
-		if runtime.GOOS != "windows" {
-			socketPaths := []string{
-				"/var/run/mysqld/mysqld.sock",
-				"/tmp/mysql.sock",
-				"/var/lib/mysql/mysql.sock",
-			}
-			for _, socket := range socketPaths {
-				if pathExists(socket) {
-					cmd = exec.CommandContext(ctx, mysqlPath, "-u", "root",
-						"--socket="+socket, "-s", "-N", "-e", fmt.Sprintf("SELECT @@%s;", variable))
-					output, err = cmd.Output()
-					if err == nil {
-						break
-					}
-				}
-			}
-		}
+	
+	// Build command with credentials
+	args := []string{
+		"-h", creds.Host,
+		"-P", creds.Port,
+		"-u", creds.Username,
 	}
-
+	
+	// Add password if provided
+	if creds.Password != "" {
+		args = append(args, fmt.Sprintf("-p%s", creds.Password))
+	}
+	
+	// Add query options and the actual query
+	args = append(args, "-s", "-N", "-e", fmt.Sprintf("SELECT @@%s;", variable))
+	
+	cmd := exec.CommandContext(ctx, mysqlPath, args...)
+	output, err := cmd.Output()
+	
 	if err != nil {
+		logger.Log("MySQL query failed for variable %s: %v", variable, err)
 		return ""
 	}
-
-	return strings.TrimSpace(string(output))
+	
+	result := strings.TrimSpace(string(output))
+	logger.Log("MySQL query for %s returned: %s", variable, result)
+	return result
 }
 
 func getMariaDBVersion() string {
@@ -1825,20 +1966,32 @@ func onTrayReady() {
 			select {
 			case <-mShow.ClickedCh:
 				logger.Log("Show menu clicked")
-				showMainWindow()
+				fyne.Do(func() {
+					showMainWindow()
+				})
 			case <-mStatus.ClickedCh:
 				logger.Log("Status menu clicked")
-				showStatusDialog()
+				fyne.Do(func() {
+					showStatusDialog()
+				})
 			case <-mStop.ClickedCh:
-				confirmStopMariaDB()
+				fyne.Do(func() {
+					confirmStopMariaDB()
+				})
 			case <-mSettings.ClickedCh:
-				showSettings()
+				fyne.Do(func() {
+					showSettings()
+				})
 			case <-mLogs.ClickedCh:
-				showLogs()
+				fyne.Do(func() {
+					showLogs()
+				})
 			case <-mOpenFolder.ClickedCh:
 				openFolder(config.ConfigPath)
 			case <-mAbout.ClickedCh:
-				showAbout()
+				fyne.Do(func() {
+					showAbout()
+				})
 			case <-mExit.ClickedCh:
 				logger.Log("Application exiting")
 				logger.Close()
@@ -1883,6 +2036,7 @@ func showMainWindow() {
 		if fyneApp == nil {
 			logger.Log("Creating new fyneApp")
 			fyneApp = app.NewWithID("mariadb-switcher")
+			fyneApp.Settings().SetTheme(theme.DarkTheme())
 			fyneApp.SetIcon(nil)
 		}
 		
@@ -1930,9 +2084,11 @@ func showMainWindow() {
 		// Set main content
 		mainWindow.SetContent(tabs)
 
-		// Initial status update
-		currentStatus = getMariaDBStatus()
-		updateStatusCard(statusCardRef)
+		// Initial status update with UI support for credentials
+		getMariaDBStatusWithUI(mainWindow, func(status MariaDBStatus) {
+			currentStatus = status
+			updateStatusCard(statusCardRef)
+		})
 
 		// Set up close handler to hide to tray instead of closing
 		mainWindow.SetCloseIntercept(func() {
@@ -1955,45 +2111,46 @@ func showStatusDialog() {
 	window := fyneApp.NewWindow("MariaDB Status")
 	window.Resize(fyne.NewSize(500, 400))
 
-	status := getMariaDBStatus()
-
-	var statusText string
-	if status.IsRunning {
-		statusText = fmt.Sprintf(`Status: Running
+	// Get status with UI support for credentials
+	getMariaDBStatusWithUI(window, func(status MariaDBStatus) {
+		var statusText string
+		if status.IsRunning {
+			statusText = fmt.Sprintf(`Status: Running
 Configuration: %s
 Config File: %s
 Data Path: %s
 Process ID: %d
 Port: %s
 Version: %s`, status.ConfigName, filepath.Base(status.ConfigFile),
-			status.DataPath, status.ProcessID, status.Port, status.Version)
-	} else {
-		statusText = "Status: Not Running"
-	}
+				status.DataPath, status.ProcessID, status.Port, status.Version)
+		} else {
+			statusText = "Status: Not Running"
+		}
 
-	// Add configuration info
-	statusText += fmt.Sprintf(`
+		// Add configuration info
+		statusText += fmt.Sprintf(`
 
 System Configuration:
 MariaDB Binary: %s
 Config Directory: %s
 Auto-Detected: %v
 Service Control: %v`, config.MariaDBBin, config.ConfigPath, 
-		config.AutoDetected, config.UseServiceControl)
+			config.AutoDetected, config.UseServiceControl)
 
-	entry := widget.NewMultiLineEntry()
-	entry.SetText(statusText)
-	entry.Disable()
+		entry := widget.NewMultiLineEntry()
+		entry.SetText(statusText)
+		entry.Disable()
 
-	content := container.NewBorder(
-		widget.NewLabel("Current MariaDB Status"),
-		widget.NewButton("Close", func() { window.Close() }),
-		nil, nil,
-		container.NewScroll(entry),
-	)
+		content := container.NewBorder(
+			widget.NewLabel("Current MariaDB Status"),
+			widget.NewButton("Close", func() { window.Close() }),
+			nil, nil,
+			container.NewScroll(entry),
+		)
 
-	window.SetContent(content)
-	window.Show()
+		window.SetContent(content)
+		window.Show()
+	})
 }
 
 
@@ -2273,15 +2430,16 @@ func showSettings() {
 	})
 
 	testBtn := widget.NewButton("Test Connection", func() {
-		status := getMariaDBStatus()
-		if status.IsRunning {
-			dialog.ShowInformation("Test Result",
-				fmt.Sprintf("MariaDB is running\nVersion: %s\nConfig: %s\nPort: %s\nData Path: %s",
-					status.Version, status.ConfigName, status.Port, status.DataPath),
-				window)
-		} else {
-			dialog.ShowInformation("Test Result", "MariaDB is not running", window)
-		}
+		getMariaDBStatusWithUI(window, func(status MariaDBStatus) {
+			if status.IsRunning {
+				dialog.ShowInformation("Test Result",
+					fmt.Sprintf("MariaDB is running\nVersion: %s\nConfig: %s\nPort: %s\nData Path: %s",
+						status.Version, status.ConfigName, status.Port, status.DataPath),
+					window)
+			} else {
+				dialog.ShowInformation("Test Result", "MariaDB is not running", window)
+			}
+		})
 	})
 
 	content := container.NewBorder(
@@ -2367,12 +2525,12 @@ Features:
 Configuration Directory:
 ` + config.ConfigPath + `
 
-© 2024 - Enhanced Multi-Config Edition`
+© 2024 - Ahmed Aredah`
 
 	entry := widget.NewMultiLineEntry()
 	entry.SetText(aboutText)
 	entry.Disable()
-
+	
 	content := container.NewBorder(
 		widget.NewLabel("About DBSwitcher"),
 		widget.NewButton("Close", func() { window.Close() }),
@@ -2499,6 +2657,7 @@ dbswitcher --config-dir /path # Set custom config directory`)
 	} else {
 		// Run GUI version
 		fyneApp = app.NewWithID("mariadb-switcher")
+		fyneApp.Settings().SetTheme(theme.DarkTheme())
 		fyneApp.SetIcon(nil)
 		mainWindow = fyneApp.NewWindow("DBSwitcher - MariaDB Configuration Manager")
 		mainWindow.Resize(fyne.NewSize(1000, 700))
@@ -2543,9 +2702,11 @@ dbswitcher --config-dir /path # Set custom config directory`)
 		// Set main content
 		mainWindow.SetContent(tabs)
 
-		// Initial status update
-		currentStatus = getMariaDBStatus()
-		updateStatusCard(statusCardRef)
+		// Initial status update with UI support for credentials
+		getMariaDBStatusWithUI(mainWindow, func(status MariaDBStatus) {
+			currentStatus = status
+			updateStatusCard(statusCardRef)
+		})
 
 		// Set up close handler to minimize to tray
 		mainWindow.SetCloseIntercept(func() {
@@ -2818,17 +2979,20 @@ func createQuickActionsCard() *widget.Card {
 
 func refreshMainUI() {
 	if mainWindow != nil && mainWindow.Content() != nil {
-		currentStatus = getMariaDBStatus()
-		scanForConfigs()
-		
-		// Refresh all UI components in the main UI thread
-		fyne.Do(func() {
-			fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
+		// Use the UI-enabled version that can prompt for credentials
+		getMariaDBStatusWithUI(mainWindow, func(status MariaDBStatus) {
+			currentStatus = status
+			scanForConfigs()
 			
-			// If you have a reference to the status card, update it directly
-			if statusCard := findStatusCard(); statusCard != nil {
-				updateStatusCard(statusCard)
-			}
+			// Refresh all UI components in the main UI thread
+			fyne.Do(func() {
+				fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
+				
+				// If you have a reference to the status card, update it directly
+				if statusCard := findStatusCard(); statusCard != nil {
+					updateStatusCard(statusCard)
+				}
+			})
 		})
 	}
 }
