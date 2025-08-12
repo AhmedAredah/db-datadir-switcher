@@ -614,20 +614,17 @@ func isDriveRemovable(path string) bool {
 		return false
 	}
 	
-	// Use wmic to get drive type
-	cmd := exec.Command("wmic", "logicaldisk", "where", fmt.Sprintf("name='%s'", path[:2]), "get", "drivetype")
+	// Use PowerShell to get drive type
+	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+		fmt.Sprintf("(Get-WmiObject Win32_LogicalDisk -Filter \"Name='%s'\").DriveType", path[:2]))
 	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
 	
-	outputStr := strings.TrimSpace(string(output))
-	lines := strings.Split(outputStr, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "2" { // Removable Disk
-			return true
-		}
+	driveType := strings.TrimSpace(string(output))
+	if driveType == "2" { // Removable Disk
+		return true
 	}
 	
 	return false
@@ -763,27 +760,42 @@ func findProcessWithCmdLine(processName string) (int, string, bool) {
 }
 
 func findWindowsProcessWithCmdLine(processName string) (int, string, bool) {
-	// Use WMIC to get command line
-	cmd := exec.Command("wmic", "process", "where", fmt.Sprintf("name='%s'", processName),
-		"get", "ProcessId,CommandLine", "/FORMAT:CSV")
+	// Use PowerShell to get process info
+	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+		fmt.Sprintf("Get-WmiObject Win32_Process -Filter \"Name='%s'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json", processName))
 	output, err := cmd.Output()
 	if err != nil {
 		return 0, "", false
 	}
 
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, processName) {
-			parts := strings.Split(line, ",")
-			if len(parts) >= 3 {
-				cmdLine := parts[1]
-				pidStr := parts[2]
-				if pid, err := strconv.Atoi(strings.TrimSpace(pidStr)); err == nil {
-					return pid, cmdLine, true
-				}
-			}
+	// Handle single object or array
+	outputStr := strings.TrimSpace(string(output))
+	if outputStr == "" {
+		return 0, "", false
+	}
+
+	// Try to parse as array first
+	var processes []struct {
+		ProcessId   int    `json:"ProcessId"`
+		CommandLine string `json:"CommandLine"`
+	}
+	
+	if err := json.Unmarshal([]byte(outputStr), &processes); err == nil {
+		// Multiple processes found
+		if len(processes) > 0 {
+			return processes[0].ProcessId, processes[0].CommandLine, true
+		}
+	} else {
+		// Try to parse as single object
+		var process struct {
+			ProcessId   int    `json:"ProcessId"`
+			CommandLine string `json:"CommandLine"`
+		}
+		if err := json.Unmarshal([]byte(outputStr), &process); err == nil {
+			return process.ProcessId, process.CommandLine, true
 		}
 	}
+	
 	return 0, "", false
 }
 
@@ -929,114 +941,6 @@ func getExecutableName(base string) string {
 	return base
 }
 
-func stopWindowsService() error {
-	if config.RequireElevation {
-		return runElevated("sc", "stop", config.ServiceNames["windows"])
-	}
-	cmd := exec.Command("sc", "stop", config.ServiceNames["windows"])
-	return cmd.Run()
-}
-
-func stopMariaDBProcess() error {
-	processNames := []string{
-		"mysqld.exe", "mysqld",
-		"mariadbd.exe", "mariadbd",
-		"mysql.exe", "mysql",  // Add client processes
-	}
-	
-	stopped := false
-	maxAttempts := 3
-	
-	for _, processName := range processNames {
-		// Skip non-Windows executables on Windows and vice versa
-		if runtime.GOOS == "windows" && !strings.HasSuffix(processName, ".exe") {
-			continue
-		}
-		if runtime.GOOS != "windows" && strings.HasSuffix(processName, ".exe") {
-			continue
-		}
-		
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			pid, _, found := findProcessWithCmdLine(processName)
-			if !found {
-				// Process not found, move to next
-				break
-			}
-			
-			logger.Log("Attempt %d: Stopping %s (PID: %d)", attempt, processName, pid)
-			
-			if runtime.GOOS == "windows" {
-				// On Windows, always use /F flag for reliability
-				cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
-				output, err := cmd.CombinedOutput()
-				logger.Log("Taskkill output: %s", string(output))
-				
-				if err == nil {
-					stopped = true
-				}
-			} else {
-				// Unix systems
-				process, err := os.FindProcess(pid)
-				if err == nil {
-					if attempt == 1 {
-						// First attempt: graceful
-						process.Signal(syscall.SIGTERM)
-					} else {
-						// Subsequent attempts: force
-						process.Signal(syscall.SIGKILL)
-					}
-					stopped = true
-				}
-			}
-			
-			// Wait for process to die
-			time.Sleep(2 * time.Second)
-			
-			// Check if it's really gone
-			if _, _, stillFound := findProcessWithCmdLine(processName); !stillFound {
-				logger.Log("Successfully stopped %s", processName)
-				break
-			} else if attempt == maxAttempts {
-				logger.Log("ERROR: Failed to stop %s after %d attempts", processName, maxAttempts)
-				
-				// Last resort: force kill on Windows
-				if runtime.GOOS == "windows" {
-					cmd := exec.Command("taskkill", "/F", "/IM", processName)
-					cmd.Run()
-				}
-			}
-		}
-	}
-	
-	if !stopped {
-		logger.Log("No MariaDB/MySQL process found to stop")
-	}
-	
-	// Final verification that port is free
-	if !isPortAvailable("3306") {
-		logger.Log("ERROR: Port 3306 is still in use after stopping processes")
-		findProcessUsingPort("3306")
-		
-		// Try to force free the port on Windows
-		if runtime.GOOS == "windows" {
-			cmd := exec.Command("cmd", "/c", "for /f \"tokens=5\" %a in ('netstat -ano ^| findstr :3306') do taskkill /F /PID %a")
-			output, _ := cmd.CombinedOutput()
-			logger.Log("Attempted to force free port 3306: %s", string(output))
-			
-			time.Sleep(2 * time.Second)
-			
-			if !isPortAvailable("3306") {
-				return fmt.Errorf("failed to free port 3306")
-			}
-		} else {
-			return fmt.Errorf("failed to free port 3306")
-		}
-	}
-	
-	logger.Log("Port 3306 is now available")
-	return nil
-}
-
 func stopLinuxService() error {
 	if config.RequireElevation {
 		cmd := exec.Command("sudo", "systemctl", "stop", config.ServiceNames["linux"])
@@ -1057,112 +961,81 @@ func stopMacService() error {
 	return cmd.Run()
 }
 
-func stopMariaDBService() error {
-	logger.Log("Attempting to stop MariaDB service")
-	
-	// First, try to stop any running mysqld process directly
-	processNames := []string{"mysqld.exe", "mysqld", "mariadbd.exe", "mariadbd", "mysql.exe", "mysql"}
-	
-	for _, processName := range processNames {
-		if runtime.GOOS != "windows" && strings.HasSuffix(processName, ".exe") {
-			continue // Skip .exe on non-Windows
-		}
-		if runtime.GOOS == "windows" && !strings.HasSuffix(processName, ".exe") {
-			continue // Skip non-.exe on Windows
-		}
-		
-		logger.Log("Looking for process: %s", processName)
-		if pid, cmdLine, found := findProcessWithCmdLine(processName); found {
-			logger.Log("Found %s process with PID: %d, CmdLine: %s", processName, pid, cmdLine)
-			
-			// Try to stop it
-			if err := killProcess(pid); err != nil {
-				logger.Log("Failed to stop process %d: %v", pid, err)
-				// Try force kill
-				if err := forceKillProcess(pid); err != nil {
-					logger.Log("Failed to force kill process %d: %v", pid, err)
-				}
-			} else {
-				logger.Log("Successfully stopped process %d", pid)
-			}
-			
-			// Wait a bit for process to fully terminate
-			time.Sleep(2 * time.Second)
-			
-			// Verify it's stopped
-			if _, _, stillRunning := findProcessWithCmdLine(processName); stillRunning {
-				logger.Log("WARNING: Process %s is still running after kill attempt", processName)
-				// Try force kill again
-				forceKillProcess(pid)
-			}
-		}
+// validateCredentials checks if credentials have required fields
+func validateCredentials(creds MySQLCredentials) error {
+	if creds.Username == "" {
+		return fmt.Errorf("username is required")
 	}
-	
-	// Also try service control if configured
-	if config.UseServiceControl {
-		logger.Log("Attempting to stop MariaDB as service")
-		switch runtime.GOOS {
-		case "windows":
-			stopWindowsService()
-		case "linux":
-			stopLinuxService()
-		case "darwin":
-			stopMacService()
-		}
+	if creds.Password == "" {
+		return fmt.Errorf("password is required")
 	}
-	
-	// Final check - make sure port 3306 is free
-	time.Sleep(1 * time.Second)
-	if !isPortAvailable("3306") {
-		logger.Log("WARNING: Port 3306 is still in use after stop attempts")
-		
-		// Try to find what's using the port on Windows
-		if runtime.GOOS == "windows" {
-			findProcessUsingPort("3306")
-		}
+	if creds.Host == "" {
+		return fmt.Errorf("host is required")
 	}
-	
 	return nil
 }
 
-func killProcess(pid int) error {
-	if runtime.GOOS == "windows" {
-		// Try graceful termination first
-		cmd := exec.Command("taskkill", "/PID", strconv.Itoa(pid))
-		output, err := cmd.CombinedOutput()
-		logger.Log("Taskkill output: %s", string(output))
-		return err
+// stopMariaDBServiceWithUI handles the stop operation with UI credential dialog
+func stopMariaDBServiceWithUI(parent fyne.Window, onComplete func(error)) {
+	logger.Log("Attempting to stop MariaDB service with UI")
+	
+	// Check if MySQL is actually running
+	if !isMariaDBRunning() {
+		logger.Log("MariaDB/MySQL is not running")
+		onComplete(nil)
+		return
 	}
 	
-	// Unix systems
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
+	// Use saved credentials if available and valid
+	if savedCredentials != nil {
+		if err := validateCredentials(*savedCredentials); err != nil {
+			logger.Log("Saved credentials are incomplete: %v", err)
+			savedCredentials = nil // Clear invalid credentials
+		} else {
+			logger.Log("Using saved credentials for graceful shutdown...")
+			err := stopMySQLWithCredentials(*savedCredentials)
+			if err == nil {
+				time.Sleep(3 * time.Second)
+				if !isMariaDBRunning() {
+					logger.Log("Successfully stopped MySQL with saved credentials")
+					onComplete(nil)
+					return
+				}
+			}
+			logger.Log("Failed to stop with saved credentials: %v", err)
+		}
 	}
 	
-	// Try graceful shutdown first
-	return process.Signal(syscall.SIGTERM)
+	// Show credential dialog if no saved credentials or they failed
+	showCredentialsDialog(parent, func(creds MySQLCredentials) {
+		// Validate provided credentials
+		if err := validateCredentials(creds); err != nil {
+			onComplete(fmt.Errorf("Invalid credentials: %v", err))
+			return
+		}
+		
+		// Save valid credentials for future use
+		savedCredentials = &creds
+		
+		// Try to stop with provided credentials
+		err := stopMySQLWithCredentials(creds)
+		if err != nil {
+			onComplete(fmt.Errorf("Failed to stop MySQL: %v", err))
+		} else {
+			time.Sleep(3 * time.Second)
+			if !isMariaDBRunning() {
+				logger.Log("Successfully stopped MySQL with provided credentials")
+				onComplete(nil)
+			} else {
+				onComplete(fmt.Errorf("MySQL graceful shutdown completed but process is still running"))
+			}
+		}
+	}, func() {
+		// User cancelled
+		onComplete(fmt.Errorf("Operation cancelled by user"))
+	})
 }
 
-func forceKillProcess(pid int) error {
-	logger.Log("Force killing process %d", pid)
-	
-	if runtime.GOOS == "windows" {
-		// Force kill on Windows
-		cmd := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid))
-		output, err := cmd.CombinedOutput()
-		logger.Log("Force taskkill output: %s", string(output))
-		return err
-	}
-	
-	// Unix systems
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	
-	return process.Signal(syscall.SIGKILL)
-}
 
 func isPortAvailable(port string) bool {
 	listener, err := net.Listen("tcp", ":"+port)
@@ -1267,55 +1140,14 @@ func startMariaDBWithConfig(configFile string) error {
 			"MariaDB is already running. Would you like to stop it and start with the new configuration?",
 			func(confirmed bool) {
 				if confirmed {
-					// Always show credentials dialog for graceful shutdown
-					showCredentialsDialog(window, func(creds MySQLCredentials) {
-						go func() {
-							progressDialog := dialog.NewCustom("Stopping MariaDB", "Please wait...",
-								container.NewVBox(
-									widget.NewProgressBarInfinite(),
-									widget.NewLabel("Stopping MariaDB gracefully..."),
-								), window)
-							progressDialog.Show()
-							
-							err := stopMySQLWithCredentials(creds)
-							progressDialog.Hide()
-							
-							if err != nil {
-								logger.Log("Failed to stop with credentials: %v", err)
-								// Ask if user wants to force stop
-								dialog.ShowConfirm("Graceful Stop Failed",
-									"Failed to stop MariaDB gracefully. Would you like to force stop? (This may cause data loss)",
-									func(forceConfirmed bool) {
-										if forceConfirmed {
-											// Force stop all MySQL/MariaDB processes
-											if err := forceStopAllMySQLProcesses(); err != nil {
-												dialog.ShowError(fmt.Errorf("Failed to force stop: %v", err), window)
-												stopCompleted <- false
-											} else {
-												time.Sleep(3 * time.Second)
-												stopCompleted <- true
-											}
-										} else {
-											stopCompleted <- false
-										}
-									}, window)
-							} else {
-								time.Sleep(3 * time.Second)
-								// Verify it's actually stopped
-								if !isMariaDBRunning() {
-									stopCompleted <- true
-								} else {
-									// Try force stop as fallback
-									logger.Log("Graceful stop completed but process still running, forcing...")
-									forceStopAllMySQLProcesses()
-									time.Sleep(2 * time.Second)
-									stopCompleted <- !isMariaDBRunning()
-								}
-							}
-						}()
-					}, func() {
-						// User cancelled credentials dialog
-						stopCompleted <- false
+					// Use the centralized stop function with UI credential handling
+					stopMariaDBServiceWithUI(window, func(err error) {
+						if err != nil {
+							logger.Log("Failed to stop MariaDB: %v", err)
+							stopCompleted <- false
+						} else {
+							stopCompleted <- true
+						}
 					})
 				} else {
 					stopCompleted <- false
@@ -1431,25 +1263,16 @@ func startMariaDBWithConfig(configFile string) error {
 		}
 	}
 
-	// Make absolutely sure all MySQL/MariaDB processes are stopped
-	logger.Log("Ensuring all MySQL/MariaDB processes are stopped...")
-	forceStopAllMySQLProcesses()
-	time.Sleep(2 * time.Second)
+	// Check if MySQL/MariaDB is still running - no force stop
+	logger.Log("Checking if all MySQL/MariaDB processes are stopped...")
+	if isMariaDBRunning() {
+		return fmt.Errorf("MySQL/MariaDB is still running - please stop it gracefully with credentials before starting a new instance")
+	}
 	
 	// Double-check the port is free
 	if !isPortAvailable(configData.Port) {
-		logger.Log("Port %s is still in use after stopping processes", configData.Port)
-		
-		// Force kill anything using the port on Windows
-		if runtime.GOOS == "windows" {
-			freePort(configData.Port)
-			time.Sleep(2 * time.Second)
-		}
-		
-		// Final check
-		if !isPortAvailable(configData.Port) {
-			return fmt.Errorf("cannot free port %s - another application is using it", configData.Port)
-		}
+		logger.Log("Port %s is still in use", configData.Port)
+		return fmt.Errorf("cannot start - port %s is occupied by another process. Please stop all MySQL/MariaDB services gracefully", configData.Port)
 	}
 	
 	logger.Log("Port %s is confirmed available", configData.Port)
@@ -1682,86 +1505,6 @@ func isPortListening(port string) bool {
 	return true
 }
 
-// Free a port on Windows
-func freePort(port string) {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	
-	// Use netstat to find PID using the port
-	cmd := exec.Command("cmd", "/c", 
-		fmt.Sprintf("for /f \"tokens=5\" %%a in ('netstat -ano ^| findstr :%s') do @echo %%a", port))
-	output, err := cmd.Output()
-	if err != nil {
-		return
-	}
-	
-	pids := strings.Split(strings.TrimSpace(string(output)), "\n")
-	for _, pidStr := range pids {
-		pidStr = strings.TrimSpace(pidStr)
-		if pidStr != "" && pidStr != "0" {
-			logger.Log("Killing process %s using port %s", pidStr, port)
-			exec.Command("taskkill", "/F", "/PID", pidStr).Run()
-		}
-	}
-}
-
-// New helper function to force stop ALL MySQL/MariaDB processes
-func forceStopAllMySQLProcesses() error {
-	processNames := []string{
-		"mysqld.exe", "mysqld",
-		"mariadbd.exe", "mariadbd", 
-		"mysql.exe", "mysql",  // Include the client processes
-	}
-	
-	logger.Log("Force stopping all MySQL/MariaDB processes...")
-	
-	for _, processName := range processNames {
-		// Skip non-Windows executables on Windows and vice versa
-		if runtime.GOOS == "windows" && !strings.HasSuffix(processName, ".exe") {
-			continue
-		}
-		if runtime.GOOS != "windows" && strings.HasSuffix(processName, ".exe") {
-			continue
-		}
-		
-		// Keep trying until no more processes found
-		for {
-			pid, _, found := findProcessWithCmdLine(processName)
-			if !found {
-				break
-			}
-			
-			logger.Log("Force killing %s (PID: %d)", processName, pid)
-			
-			if runtime.GOOS == "windows" {
-				// Force kill on Windows
-				cmd := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid))
-				output, err := cmd.CombinedOutput()
-				if err != nil {
-					logger.Log("Failed to kill %s: %v", processName, err)
-				} else {
-					logger.Log("Killed %s: %s", processName, string(output))
-				}
-			} else {
-				// Unix systems
-				process, err := os.FindProcess(pid)
-				if err == nil {
-					process.Signal(syscall.SIGKILL)
-				}
-			}
-			
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-
-	// Step 2: CRITICAL - Wait for Windows to release file locks
-	logger.Log("Waiting for Windows to release file locks...")
-	time.Sleep(3 * time.Second) // Same as PowerShell script
-	
-	logger.Log("All MySQL/MariaDB processes have been terminated")
-	return nil
-}
 
 // Add menu item for credential management
 func createCredentialsMenu() *fyne.MenuItem {
@@ -1944,7 +1687,6 @@ func onTrayReady() {
 
 	// Menu items
 	mStatus := systray.AddMenuItem("Show Status", "Show current MariaDB status")
-	mConfigs := systray.AddMenuItem("Configuration Manager", "Manage configurations")
 	systray.AddSeparator()
 	
 	// Add dynamic config menu items
@@ -1982,8 +1724,6 @@ func onTrayReady() {
 			select {
 			case <-mStatus.ClickedCh:
 				showStatusDialog()
-			case <-mConfigs.ClickedCh:
-				showConfigurationManager()
 			case <-mStop.ClickedCh:
 				confirmStopMariaDB()
 			case <-mSettings.ClickedCh:
@@ -2078,219 +1818,6 @@ Service Control: %v`, config.MariaDBBin, config.ConfigPath,
 	window.Show()
 }
 
-func showConfigurationManager() {
-	if fyneApp == nil {
-		fyneApp = app.NewWithID("mariadb-switcher")
-	}
-	window := fyneApp.NewWindow("Configuration Manager")
-	window.Resize(fyne.NewSize(900, 600))
-
-	// Refresh configs
-	scanForConfigs()
-	currentStatus = getMariaDBStatus()
-
-	// Track selected config index
-	var selectedConfig int = -1
-
-	// Create config list with better formatting
-	configList := widget.NewList(
-		func() int { return len(availableConfigs) },
-		func() fyne.CanvasObject {
-			nameLabel := widget.NewLabel("Config Name")
-			nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-			portLabel := widget.NewLabel("Port: 3306")
-			statusLabel := widget.NewLabel("Ready")
-			descLabel := widget.NewLabel("Description")
-			
-			return container.NewVBox(
-				container.NewHBox(nameLabel, layout.NewSpacer(), portLabel, statusLabel),
-				descLabel,
-				widget.NewSeparator(),
-			)
-		},
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			c := o.(*fyne.Container)
-			cfg := availableConfigs[i]
-			
-			topRow := c.Objects[0].(*fyne.Container)
-nameLabel := topRow.Objects[0].(*widget.Label)
-			portLabel := topRow.Objects[2].(*widget.Label)
-			statusLabel := topRow.Objects[3].(*widget.Label)
-			descLabel := c.Objects[1].(*widget.Label)
-			
-			nameLabel.SetText(cfg.Name)
-			portLabel.SetText("Port: " + cfg.Port)
-			
-			status := "Ready"
-			if cfg.IsActive && currentStatus.IsRunning {
-				status = "● ACTIVE"
-				statusLabel.TextStyle = fyne.TextStyle{Bold: true}
-			} else if !cfg.Exists {
-				status = "Missing"
-			}
-			statusLabel.SetText(status)
-			
-			desc := cfg.Description
-			if desc == "" {
-				desc = fmt.Sprintf("Data: %s", cfg.DataDir)
-			}
-			descLabel.SetText(desc)
-		},
-	)
-
-	// Handle selection
-	configList.OnSelected = func(id widget.ListItemID) {
-		selectedConfig = id
-	}
-
-	// Status bar
-	statusBar := widget.NewLabel("")
-	updateStatusBar := func() {
-		if currentStatus.IsRunning {
-			statusBar.SetText(fmt.Sprintf("MariaDB is running with %s configuration on port %s", 
-				currentStatus.ConfigName, currentStatus.Port))
-		} else {
-			statusBar.SetText("MariaDB is not running")
-		}
-	}
-	updateStatusBar()
-
-	// Buttons
-	startBtn := widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(), func() {
-		if selectedConfig >= 0 && selectedConfig < len(availableConfigs) {
-			cfg := availableConfigs[selectedConfig]
-			statusBar.SetText(fmt.Sprintf("Starting %s configuration...", cfg.Name))
-			
-			go func(config MariaDBConfig) {
-				err := startMariaDBWithConfig(config.Path)
-				
-				// Always update status after operation
-				currentStatus = getMariaDBStatus()
-				scanForConfigs()
-				
-				// Update UI on main thread
-				fyne.Do(func() {
-					fyne.CurrentApp().Driver().CanvasForObject(window.Content()).Refresh(window.Content())
-					
-					if err != nil {
-						fyne.CurrentApp().SendNotification(&fyne.Notification{
-							Title:	"Start Failed",
-							Content: fmt.Sprintf("Failed to start %s: %v", config.Name, err),
-						})
-						statusBar.SetText("Failed to start MariaDB")
-						dialog.ShowError(err, window)
-					} else {
-						fyne.CurrentApp().SendNotification(&fyne.Notification{
-							Title:	"MariaDB Started",
-							Content: fmt.Sprintf("Successfully started %s on port %s", config.Name, config.Port),
-						})
-						dialog.ShowInformation("Success",
-							fmt.Sprintf("Started MariaDB with %s configuration\nPort: %s\nData: %s", 
-								config.Name, config.Port, config.DataDir), window)
-						configList.Refresh()
-						updateStatusBar()
-					}
-				})
-			}(cfg)
-		}
-	})
-
-	stopBtn := widget.NewButtonWithIcon("Stop", theme.MediaStopIcon(), func() {
-		statusBar.SetText("Stopping MariaDB...")
-		go func() {
-			err := stopMariaDBService()
-			scanForConfigs()
-			currentStatus = getMariaDBStatus()
-			
-			// Update UI on main thread
-			fyne.Do(func() {
-				if err != nil {
-					dialog.ShowError(err, window)
-					statusBar.SetText("Failed to stop MariaDB")
-				} else {
-					dialog.ShowInformation("Success", "MariaDB stopped successfully", window)
-					configList.Refresh()
-					updateStatusBar()
-				}
-			})
-		}()
-	})
-
-	editBtn := widget.NewButtonWithIcon("Edit", theme.DocumentIcon(), func() {
-		if selectedConfig >= 0 && selectedConfig < len(availableConfigs) {
-			cfg := availableConfigs[selectedConfig]
-			openFileInEditor(cfg.Path)
-		}
-	})
-
-	deleteBtn := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), func() {
-		if selectedConfig >= 0 && selectedConfig < len(availableConfigs) {
-			cfg := availableConfigs[selectedConfig]
-			dialog.ShowConfirm("Delete Configuration",
-				fmt.Sprintf("Are you sure you want to delete %s.ini?", cfg.Name),
-				func(confirm bool) {
-					if confirm {
-						os.Remove(cfg.Path)
-						scanForConfigs()
-						configList.Refresh()
-					}
-				}, window)
-		}
-	})
-
-	openFolderBtn := widget.NewButtonWithIcon("Open Folder", theme.FolderOpenIcon(), func() {
-		openFolder(config.ConfigPath)
-	})
-
-	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-		scanForConfigs()
-		currentStatus = getMariaDBStatus()
-		configList.Refresh()
-		updateStatusBar()
-	})
-
-	// Layout
-	toolbar := container.NewHBox(
-		startBtn,
-		stopBtn,
-		widget.NewSeparator(),
-		editBtn,
-		deleteBtn,
-		widget.NewSeparator(),
-		openFolderBtn,
-		refreshBtn,
-	)
-
-	// Info panel
-	infoText := fmt.Sprintf(`Configuration Directory: %s
-Available Configurations: %d
-Current Status: `, config.ConfigPath, len(availableConfigs))
-	
-	if currentStatus.IsRunning {
-		infoText += fmt.Sprintf("Running (%s)", currentStatus.ConfigName)
-	} else {
-		infoText += "Stopped"
-	}
-	
-	infoLabel := widget.NewLabel(infoText)
-
-	content := container.NewBorder(
-		container.NewVBox(
-			toolbar,
-			widget.NewSeparator(),
-		),
-		container.NewVBox(
-			widget.NewSeparator(),
-			statusBar,
-			infoLabel,
-		),
-		nil, nil,
-		configList,
-	)
-
-	window.SetContent(content)
-	window.Show()
-}
 
 func openFileInEditor(path string) {
 	var cmd *exec.Cmd
@@ -2356,7 +1883,11 @@ func stopMySQLWithCredentials(creds MySQLCredentials) error {
 	
 	args = append(args, "shutdown")
 	
+	// Log the full command for debugging
+	cmdStr := mysqladminPath + " " + strings.Join(args, " ")
+	fmt.Printf("Executing command: %s\n", cmdStr)
 	logger.Log("Executing graceful shutdown with mysqladmin...")
+	logger.Log("Command: %s %s", mysqladminPath, strings.Join(args, " "))
 	cmd := exec.Command(mysqladminPath, args...)
 	output, err := cmd.CombinedOutput()
 	
@@ -2364,41 +1895,11 @@ func stopMySQLWithCredentials(creds MySQLCredentials) error {
 		logger.Log("mysqladmin shutdown error: %v\nOutput: %s", err, string(output))
 		return fmt.Errorf("shutdown failed: %v", err)
 	}
+	// wait for 3 seconds
+	time.Sleep(3 * time.Second)
 	
 	logger.Log("MySQL shutdown command executed successfully")
 	return nil
-}
-
-func stopMariaDBServiceWithAuth() error {
-	logger.Log("Attempting to stop MariaDB/MySQL service...")
-	
-	// First check if MySQL is actually running
-	if !isMariaDBRunning() {
-		logger.Log("MariaDB/MySQL is not running")
-		return nil
-	}
-	
-	// Check if we have saved credentials
-	if savedCredentials != nil {
-		logger.Log("Using saved credentials for shutdown...")
-		err := stopMySQLWithCredentials(*savedCredentials)
-		if err == nil {
-			time.Sleep(3 * time.Second)
-			if !isMariaDBRunning() {
-				logger.Log("Successfully stopped MySQL with saved credentials")
-				return nil
-			}
-		} else {
-			logger.Log("Failed with saved credentials: %v", err)
-		}
-	}
-	
-	// REMOVED: Default credentials attempt
-	// Now directly return error requiring credentials
-	
-	// If we reach here, we need to prompt for credentials
-	logger.Log("Need admin credentials for graceful shutdown")
-	return fmt.Errorf("admin credentials required")
 }
 
 // Check if MariaDB/MySQL is running
@@ -2429,66 +1930,45 @@ func confirmStopMariaDB() {
 	
 	// Create stop button with credential handling - PRIMARY ACTION
 	stopWithCredsBtn := widget.NewButton("Stop with Credentials", func() {
-		showCredentialsDialog(window, func(creds MySQLCredentials) {
-			progressDialog := dialog.NewCustom("Stopping MariaDB", "Cancel",
-				container.NewVBox(
-					widget.NewProgressBarInfinite(),
-					widget.NewLabel("Stopping MariaDB/MySQL gracefully..."),
-				), window)
-			progressDialog.Show()
-			
-			go func() {
-				err := stopMySQLWithCredentials(creds)
-				
-				if err != nil {
-					fyne.CurrentApp().SendNotification(&fyne.Notification{
-						Title:   "Stop Failed",
-						Content: fmt.Sprintf("Failed to stop: %v", err),
-					})
-					
-					progressDialog.Hide()
-					dialog.ShowError(fmt.Errorf("Failed to stop MySQL: %v\n\nTry checking your credentials or use Force Stop", err), window)
-				} else {
-					// Wait for process to fully stop
-					time.Sleep(3 * time.Second)
-					
-					if !isMariaDBRunning() {
-						progressDialog.Hide()
-						fyne.CurrentApp().SendNotification(&fyne.Notification{
-							Title:   "Success",
-							Content: "MariaDB/MySQL stopped successfully",
-						})
-						dialog.ShowInformation("Success", "MariaDB/MySQL has been stopped gracefully", window)
-						window.Close()
-					} else {
-						progressDialog.Hide()
-						dialog.ShowError(fmt.Errorf("MySQL process is still running. You may need to use Force Stop"), window)
-					}
-				}
-			}()
-		}, func() {
-			// User cancelled
+		stopMariaDBServiceWithUI(window, func(err error) {
+			if err != nil {
+				fyne.CurrentApp().SendNotification(&fyne.Notification{
+					Title:   "Stop Failed",
+					Content: fmt.Sprintf("Failed to stop: %v", err),
+				})
+				dialog.ShowError(err, window)
+			} else {
+				fyne.CurrentApp().SendNotification(&fyne.Notification{
+					Title:   "Success",
+					Content: "MariaDB/MySQL stopped successfully",
+				})
+				dialog.ShowInformation("Success", "MariaDB/MySQL has been stopped gracefully", window)
+				window.Close()
+			}
 		})
 	})
 	stopWithCredsBtn.Importance = widget.HighImportance  // CHANGED: Set to high importance
 	
-	// Force stop button (last resort)
-	forceStopBtn := widget.NewButton("Force Stop (Not Recommended)", func() {
-		dialog.ShowConfirm("Force Stop", 
-			"This will forcefully terminate MySQL processes.\nThis may cause data corruption.\n\nAre you sure?",
-			func(confirmed bool) {
-				if confirmed {
-					err := stopMariaDBProcess() // Use the original force stop
-					if err != nil {
-						dialog.ShowError(err, window)
-					} else {
-						dialog.ShowInformation("Success", "MariaDB/MySQL processes terminated", window)
-						window.Close()
-					}
-				}
-			}, window)
+	// Info about manual stop (replaces force stop button)
+	manualStopBtn := widget.NewButton("Manual Stop Instructions", func() {
+		instructions := `To manually stop MySQL/MariaDB safely:
+
+Windows:
+• Open Services (services.msc)
+• Find MySQL/MariaDB service and click Stop
+• Or use: sc stop mysql
+
+Linux:
+• sudo systemctl stop mysql
+• Or: sudo systemctl stop mariadb
+
+macOS:
+• sudo brew services stop mysql
+• Or: sudo launchctl unload -w /Library/LaunchDaemons/com.oracle.oss.mysql.mysqld.plist`
+		
+		dialog.ShowInformation("Manual Stop Instructions", instructions, window)
 	})
-	forceStopBtn.Importance = widget.LowImportance
+	manualStopBtn.Importance = widget.LowImportance
 	
 	cancelBtn := widget.NewButton("Cancel", func() {
 		window.Close()
@@ -2502,7 +1982,7 @@ func confirmStopMariaDB() {
 		infoLabel,  // ADDED: Informative text
 		widget.NewSeparator(),
 		stopWithCredsBtn,
-		forceStopBtn,
+		manualStopBtn,
 		widget.NewSeparator(),
 		cancelBtn,
 	)
@@ -2916,17 +2396,13 @@ func createMainMenu() *fyne.MainMenu {
 		),
 		fyne.NewMenu("View",
 			fyne.NewMenuItem("Refresh", func() {
-				scanForConfigs()
-				currentStatus = getMariaDBStatus()
+				refreshMainUI()
 			}),
 			fyne.NewMenuItem("Logs", func() {
 				showLogs()
 			}),
 		),
 		fyne.NewMenu("Tools",
-			fyne.NewMenuItem("Configuration Manager", func() {
-				showConfigurationManager()
-			}),
 			createCredentialsMenu(),
 			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Run in System Tray", func() {
@@ -3035,8 +2511,7 @@ func createQuickActionsCard() *widget.Card {
 					err := startMariaDBWithConfig(config.Path)
 					
 					// Update status after start attempt
-					currentStatus = getMariaDBStatus()
-					scanForConfigs()
+					refreshMainUI()
 					
 					// Update UI on main thread
 					fyne.Do(func() {
@@ -3080,27 +2555,27 @@ func createQuickActionsCard() *widget.Card {
 					Content: "Stopping MariaDB service...",
 				})
 				
-				err := stopMariaDBService()
-				currentStatus = getMariaDBStatus()
-				scanForConfigs()
-				
-				// Force UI refresh
-				fyne.Do(func() {
-					fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
+				stopMariaDBServiceWithUI(mainWindow, func(err error) {
+					refreshMainUI()
 					
-					if err != nil {
-						fyne.CurrentApp().SendNotification(&fyne.Notification{
-							Title:	"Stop Failed",
-							Content: err.Error(),
-						})
-						dialog.ShowError(err, mainWindow)
-					} else {
-						fyne.CurrentApp().SendNotification(&fyne.Notification{
-							Title:	"MariaDB Stopped",
-							Content: "MariaDB has been stopped successfully",
-						})
-						dialog.ShowInformation("Success", "MariaDB stopped successfully", mainWindow)
-					}
+					// Force UI refresh
+					fyne.Do(func() {
+						fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
+						
+						if err != nil {
+							fyne.CurrentApp().SendNotification(&fyne.Notification{
+								Title:	"Stop Failed",
+								Content: err.Error(),
+							})
+							dialog.ShowError(err, mainWindow)
+						} else {
+							fyne.CurrentApp().SendNotification(&fyne.Notification{
+								Title:	"MariaDB Stopped",
+								Content: "MariaDB has been stopped successfully",
+							})
+							dialog.ShowInformation("Success", "MariaDB stopped successfully", mainWindow)
+						}
+					})
 				})
 			}()
 		}
@@ -3115,39 +2590,37 @@ func createQuickActionsCard() *widget.Card {
 					currentConfig = config.LastUsedConfig
 				}
 				
-				// Stop
-				stopErr := stopMariaDBService()
-				if stopErr != nil {
-					// Update UI on main thread
-					fyne.Do(func() {
-						dialog.ShowError(stopErr, mainWindow)
-					})
-					return
-				}
-				
-				time.Sleep(3 * time.Second)
-				
-				// Start with same config
-				if currentConfig != "" {
-					startErr := startMariaDBWithConfig(currentConfig)
-					currentStatus = getMariaDBStatus()
+				// Stop with UI credential handling
+				stopMariaDBServiceWithUI(mainWindow, func(stopErr error) {
+					if stopErr != nil {
+						// Update UI on main thread
+						fyne.Do(func() {
+							dialog.ShowError(stopErr, mainWindow)
+						})
+						return
+					}
 					
-					// Update UI on main thread
-					fyne.Do(func() {
-						if startErr != nil {
-							dialog.ShowError(startErr, mainWindow)
-						} else {
-							dialog.ShowInformation("Success", "MariaDB restarted successfully", mainWindow)
-						}
-					})
-				}
+					time.Sleep(3 * time.Second)
+					
+					// Start with same config
+					if currentConfig != "" {
+						startErr := startMariaDBWithConfig(currentConfig)
+						refreshMainUI()
+						
+						// Update UI on main thread
+						fyne.Do(func() {
+							if startErr != nil {
+								dialog.ShowError(startErr, mainWindow)
+							} else {
+								dialog.ShowInformation("Success", "MariaDB restarted successfully", mainWindow)
+							}
+						})
+					}
+				})
 			}()
 		}
 	})
 
-	configManagerBtn := widget.NewButton("Configuration Manager", func() {
-		showConfigurationManager()
-	})
 
 	openFolderBtn := widget.NewButton("Open Config Folder", func() {
 		openFolder(config.ConfigPath)
@@ -3155,7 +2628,7 @@ func createQuickActionsCard() *widget.Card {
 
 	return widget.NewCard("Quick Actions", "", container.NewVBox(
 		container.NewBorder(nil, nil, widget.NewLabel("Start with:"), startBtn, configSelect),
-		container.NewGridWithColumns(3, stopBtn, restartBtn, configManagerBtn),
+		container.NewGridWithColumns(2, stopBtn, restartBtn),
 		openFolderBtn,
 	))
 }
@@ -3165,13 +2638,15 @@ func refreshMainUI() {
 		currentStatus = getMariaDBStatus()
 		scanForConfigs()
 		
-		// Refresh all UI components
-		fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
-		
-		// If you have a reference to the status card, update it directly
-		if statusCard := findStatusCard(); statusCard != nil {
-			updateStatusCard(statusCard)
-		}
+		// Refresh all UI components in the main UI thread
+		fyne.Do(func() {
+			fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
+			
+			// If you have a reference to the status card, update it directly
+			if statusCard := findStatusCard(); statusCard != nil {
+				updateStatusCard(statusCard)
+			}
+		})
 	}
 }
 
@@ -3198,124 +2673,202 @@ func createConfigCard() fyne.CanvasObject {
 	// Refresh configs
 	scanForConfigs()
 
-	// Create config list table
-	configTable := widget.NewTable(
-		func() (int, int) {
-			return len(availableConfigs) + 1, 5 // +1 for header
-		},
+	// Track selected config index
+	var selectedConfig int = -1
+
+	// Create config list with better formatting
+	configList := widget.NewList(
+		func() int { return len(availableConfigs) },
 		func() fyne.CanvasObject {
-			return widget.NewLabel("cell")
+			nameLabel := widget.NewLabel("Config Name")
+			nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+			portLabel := widget.NewLabel("Port: 3306")
+			statusLabel := widget.NewLabel("Ready")
+			descLabel := widget.NewLabel("Description")
+			
+			return container.NewVBox(
+				container.NewHBox(nameLabel, layout.NewSpacer(), portLabel, statusLabel),
+				descLabel,
+				widget.NewSeparator(),
+			)
 		},
-		func(i widget.TableCellID, o fyne.CanvasObject) {
-			label := o.(*widget.Label)
-			if i.Row == 0 {
-				// Header row
-				headers := []string{"Name", "Port", "Data Directory", "Description", "Status"}
-				label.SetText(headers[i.Col])
-				label.TextStyle = fyne.TextStyle{Bold: true}
-			} else {
-				// Data rows
-				cfg := availableConfigs[i.Row-1]
-				switch i.Col {
-				case 0:
-					label.SetText(cfg.Name)
-				case 1:
-					label.SetText(cfg.Port)
-				case 2:
-					label.SetText(cfg.DataDir)
-				case 3:
-					label.SetText(cfg.Description)
-				case 4:
-					if cfg.IsActive && currentStatus.IsRunning {
-						label.SetText("● Active")
-						label.TextStyle = fyne.TextStyle{Bold: true}
-					} else {
-						label.SetText("Ready")
-						label.TextStyle = fyne.TextStyle{}
-					}
-				}
+		func(i widget.ListItemID, o fyne.CanvasObject) {
+			c := o.(*fyne.Container)
+			cfg := availableConfigs[i]
+			
+			topRow := c.Objects[0].(*fyne.Container)
+			nameLabel := topRow.Objects[0].(*widget.Label)
+			portLabel := topRow.Objects[2].(*widget.Label)
+			statusLabel := topRow.Objects[3].(*widget.Label)
+			descLabel := c.Objects[1].(*widget.Label)
+			
+			nameLabel.SetText(cfg.Name)
+			portLabel.SetText("Port: " + cfg.Port)
+			
+			status := "Ready"
+			if cfg.IsActive && currentStatus.IsRunning {
+				status = "● ACTIVE"
+				statusLabel.TextStyle = fyne.TextStyle{Bold: true}
+			} else if !cfg.Exists {
+				status = "Missing"
 			}
+			statusLabel.SetText(status)
+			
+			desc := cfg.Description
+			if desc == "" {
+				desc = fmt.Sprintf("Data: %s", cfg.DataDir)
+			}
+			descLabel.SetText(desc)
 		},
 	)
 
-	// Set column widths
-	configTable.SetColumnWidth(0, 150)
-	configTable.SetColumnWidth(1, 80)
-	configTable.SetColumnWidth(2, 250)
-	configTable.SetColumnWidth(3, 200)
-	configTable.SetColumnWidth(4, 80)
-
-	// Track selected row
-	var selectedRow int = -1
-	configTable.OnSelected = func(cell widget.TableCellID) {
-		if cell.Row > 0 { // Skip header row
-			selectedRow = cell.Row - 1
-		}
+	// Handle selection
+	configList.OnSelected = func(id widget.ListItemID) {
+		selectedConfig = id
 	}
 
-	// Action buttons
+	// Status bar
+	statusBar := widget.NewLabel("")
+	updateStatusBar := func() {
+		if currentStatus.IsRunning {
+			statusBar.SetText(fmt.Sprintf("MariaDB is running with %s configuration on port %s", 
+				currentStatus.ConfigName, currentStatus.Port))
+		} else {
+			statusBar.SetText("MariaDB is not running")
+		}
+	}
+	updateStatusBar()
+
+	// Buttons
 	startBtn := widget.NewButtonWithIcon("Start", theme.MediaPlayIcon(), func() {
-		if selectedRow >= 0 && selectedRow < len(availableConfigs) {
-			cfg := availableConfigs[selectedRow]
-			go func() {
-				err := startMariaDBWithConfig(cfg.Path)
-				scanForConfigs()
-				currentStatus = getMariaDBStatus()
+		if selectedConfig >= 0 && selectedConfig < len(availableConfigs) {
+			cfg := availableConfigs[selectedConfig]
+			statusBar.SetText(fmt.Sprintf("Starting %s configuration...", cfg.Name))
+			
+			go func(config MariaDBConfig) {
+				err := startMariaDBWithConfig(config.Path)
+				
+				// Always update status after operation
+				refreshMainUI()
+				
+				// Update UI on main thread
+				fyne.Do(func() {
+					fyne.CurrentApp().Driver().CanvasForObject(mainWindow.Content()).Refresh(mainWindow.Content())
+					
+					if err != nil {
+						fyne.CurrentApp().SendNotification(&fyne.Notification{
+							Title:	"Start Failed",
+							Content: fmt.Sprintf("Failed to start %s: %v", config.Name, err),
+						})
+						statusBar.SetText("Failed to start MariaDB")
+						dialog.ShowError(err, mainWindow)
+					} else {
+						fyne.CurrentApp().SendNotification(&fyne.Notification{
+							Title:	"MariaDB Started",
+							Content: fmt.Sprintf("Successfully started %s on port %s", config.Name, config.Port),
+						})
+						dialog.ShowInformation("Success",
+							fmt.Sprintf("Started MariaDB with %s configuration\nPort: %s\nData: %s", 
+								config.Name, config.Port, config.DataDir), mainWindow)
+						configList.Refresh()
+						updateStatusBar()
+					}
+				})
+			}(cfg)
+		}
+	})
+
+	stopBtn := widget.NewButtonWithIcon("Stop", theme.MediaStopIcon(), func() {
+		statusBar.SetText("Stopping MariaDB...")
+		go func() {
+			stopMariaDBServiceWithUI(mainWindow, func(err error) {
+				refreshMainUI()
 				
 				// Update UI on main thread
 				fyne.Do(func() {
 					if err != nil {
 						dialog.ShowError(err, mainWindow)
+						statusBar.SetText("Failed to stop MariaDB")
 					} else {
-						configTable.Refresh()
+						dialog.ShowInformation("Success", "MariaDB stopped successfully", mainWindow)
+						configList.Refresh()
+						updateStatusBar()
 					}
 				})
-			}()
-		}
+			})
+		}()
 	})
 
 	editBtn := widget.NewButtonWithIcon("Edit", theme.DocumentIcon(), func() {
-		if selectedRow >= 0 && selectedRow < len(availableConfigs) {
-			cfg := availableConfigs[selectedRow]
+		if selectedConfig >= 0 && selectedConfig < len(availableConfigs) {
+			cfg := availableConfigs[selectedConfig]
 			openFileInEditor(cfg.Path)
 		}
 	})
 
 	deleteBtn := widget.NewButtonWithIcon("Delete", theme.DeleteIcon(), func() {
-		if selectedRow >= 0 && selectedRow < len(availableConfigs) {
-			cfg := availableConfigs[selectedRow]
+		if selectedConfig >= 0 && selectedConfig < len(availableConfigs) {
+			cfg := availableConfigs[selectedConfig]
 			dialog.ShowConfirm("Delete Configuration",
-				fmt.Sprintf("Are you sure you want to delete %s?", cfg.Name),
+				fmt.Sprintf("Are you sure you want to delete %s.ini?", cfg.Name),
 				func(confirm bool) {
 					if confirm {
 						os.Remove(cfg.Path)
 						scanForConfigs()
-						configTable.Refresh()
+						configList.Refresh()
 					}
 				}, mainWindow)
 		}
 	})
 
-	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-		scanForConfigs()
-		currentStatus = getMariaDBStatus()
-		configTable.Refresh()
+	openFolderBtn := widget.NewButtonWithIcon("Open Folder", theme.FolderOpenIcon(), func() {
+		openFolder(config.ConfigPath)
 	})
 
+	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
+		refreshMainUI()
+		configList.Refresh()
+		updateStatusBar()
+	})
+
+	// Layout
 	toolbar := container.NewHBox(
 		startBtn,
+		stopBtn,
+		widget.NewSeparator(),
 		editBtn,
 		deleteBtn,
-		layout.NewSpacer(),
+		widget.NewSeparator(),
+		openFolderBtn,
 		refreshBtn,
 	)
 
-	infoLabel := widget.NewLabel(fmt.Sprintf("Configuration files are stored in: %s", config.ConfigPath))
+	// Info panel
+	infoText := fmt.Sprintf(`Configuration Directory: %s
+Available Configurations: %d
+Current Status: `, config.ConfigPath, len(availableConfigs))
+	
+	if currentStatus.IsRunning {
+		infoText += fmt.Sprintf("Running (%s)", currentStatus.ConfigName)
+	} else {
+		infoText += "Stopped"
+	}
+	
+	infoLabel := widget.NewLabel(infoText)
 
-	return container.NewBorder(
-		toolbar,
-		infoLabel,
+	content := container.NewBorder(
+		container.NewVBox(
+			toolbar,
+			widget.NewSeparator(),
+		),
+		container.NewVBox(
+			widget.NewSeparator(),
+			statusBar,
+			infoLabel,
+		),
 		nil, nil,
-		configTable,
+		configList,
 	)
+
+	return content
 }
