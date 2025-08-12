@@ -19,6 +19,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/cmd/fyne_settings/settings"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
@@ -107,6 +108,22 @@ func (l *Logger) Close() {
 	if l.file != nil {
 		l.file.Close()
 	}
+}
+
+// Show Fyne appearance settings
+func showAppearanceSettings() {
+	if fyneApp == nil {
+		fyneApp = app.NewWithID("mariadb-switcher")
+	}
+	
+	// Create appearance settings window
+	settingsWindow := fyneApp.NewWindow("Appearance Settings")
+	settingsWindow.Resize(fyne.NewSize(400, 300))
+	
+	// Create settings content using Fyne's built-in settings
+	settingsContent := settings.NewSettings().LoadAppearanceScreen(settingsWindow)
+	settingsWindow.SetContent(settingsContent)
+	settingsWindow.Show()
 }
 
 // Keyring service constants
@@ -2036,7 +2053,6 @@ func showMainWindow() {
 		if fyneApp == nil {
 			logger.Log("Creating new fyneApp")
 			fyneApp = app.NewWithID("mariadb-switcher")
-			fyneApp.Settings().SetTheme(theme.DarkTheme())
 			fyneApp.SetIcon(nil)
 		}
 		
@@ -2657,7 +2673,6 @@ dbswitcher --config-dir /path # Set custom config directory`)
 	} else {
 		// Run GUI version
 		fyneApp = app.NewWithID("mariadb-switcher")
-		fyneApp.Settings().SetTheme(theme.DarkTheme())
 		fyneApp.SetIcon(nil)
 		mainWindow = fyneApp.NewWindow("DBSwitcher - MariaDB Configuration Manager")
 		mainWindow.Resize(fyne.NewSize(1000, 700))
@@ -2742,6 +2757,10 @@ func createMainMenu() *fyne.MainMenu {
 			}),
 			fyne.NewMenuItem("Logs", func() {
 				showLogs()
+			}),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Appearance", func() {
+				showAppearanceSettings()
 			}),
 		),
 		fyne.NewMenu("Tools",
