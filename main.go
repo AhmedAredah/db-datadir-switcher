@@ -79,6 +79,7 @@ var (
 	logger			  *Logger
 	statusCardRef	 *widget.Card
 	savedCredentials *MySQLCredentials
+	systrayRunning   bool
 )
 
 // Logger for debugging
@@ -1769,6 +1770,13 @@ func initializeDataDir(dataDir string) error {
 
 // GUI Implementation
 func createSystemTray() {
+	if systrayRunning {
+		logger.Log("System tray already running, skipping creation")
+		return
+	}
+	
+	systrayRunning = true
+	logger.Log("Starting system tray")
 	systray.Run(onTrayReady, onTrayExit)
 }
 
@@ -1777,6 +1785,8 @@ func onTrayReady() {
 	systray.SetTooltip("MariaDB Configuration Switcher")
 
 	// Menu items
+	mShow := systray.AddMenuItem("Show", "Show main window")
+	systray.AddSeparator()
 	mStatus := systray.AddMenuItem("Show Status", "Show current MariaDB status")
 	systray.AddSeparator()
 	
@@ -1813,7 +1823,11 @@ func onTrayReady() {
 	go func() {
 		for {
 			select {
+			case <-mShow.ClickedCh:
+				logger.Log("Show menu clicked")
+				showMainWindow()
 			case <-mStatus.ClickedCh:
+				logger.Log("Status menu clicked")
 				showStatusDialog()
 			case <-mStop.ClickedCh:
 				confirmStopMariaDB()
@@ -1829,7 +1843,7 @@ func onTrayReady() {
 				logger.Log("Application exiting")
 				logger.Close()
 				systray.Quit()
-			default:
+			case <-time.After(100 * time.Millisecond):
 				// Check config submenu items
 				for i, subItem := range configSubMenus {
 					select {
@@ -1846,7 +1860,8 @@ func onTrayReady() {
 }
 
 func onTrayExit() {
-	// Cleanup
+	logger.Log("System tray exiting")
+	systrayRunning = false
 }
 
 func updateTrayIcon() {
@@ -1859,6 +1874,78 @@ func updateTrayIcon() {
 		systray.SetTitle("DBSwitcher ✗")
 		systray.SetTooltip("MariaDB Stopped")
 	}
+}
+
+func showMainWindow() {
+	logger.Log("showMainWindow called")
+	
+	fyne.Do(func() {
+		if fyneApp == nil {
+			logger.Log("Creating new fyneApp")
+			fyneApp = app.NewWithID("mariadb-switcher")
+			fyneApp.SetIcon(nil)
+		}
+		
+		// Always create a new window since Fyne windows can't be properly restored after hiding
+		logger.Log("Creating new main window")
+		mainWindow = fyneApp.NewWindow("DBSwitcher - MariaDB Configuration Manager")
+		mainWindow.Resize(fyne.NewSize(1000, 700))
+
+		// Create main interface
+		statusCardRef = createStatusCard()
+		configCard := createConfigCard()
+		quickActionsCard := createQuickActionsCard()
+
+		// Auto-refresh ticker with proper UI update
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				oldStatus := currentStatus
+				currentStatus = getMariaDBStatus()
+				
+				// Only refresh if status changed
+				if oldStatus.IsRunning != currentStatus.IsRunning ||
+					oldStatus.ConfigName != currentStatus.ConfigName {
+					fyne.Do(func() {
+						fyne.CurrentApp().Driver().CanvasForObject(statusCardRef).Refresh(statusCardRef)
+						updateStatusCard(statusCardRef)
+					})
+				}
+			}
+		}()
+
+		// Main content with tabs
+		tabs := container.NewAppTabs(
+			container.NewTabItem("Dashboard", container.NewVBox(
+				statusCardRef,
+				quickActionsCard,
+			)),
+			container.NewTabItem("Configurations", configCard),
+		)
+
+		// Create menu
+		mainWindow.SetMainMenu(createMainMenu())
+
+		// Set main content
+		mainWindow.SetContent(tabs)
+
+		// Initial status update
+		currentStatus = getMariaDBStatus()
+		updateStatusCard(statusCardRef)
+
+		// Set up close handler to hide to tray instead of closing
+		mainWindow.SetCloseIntercept(func() {
+			logger.Log("Main window close intercepted - hiding window")
+			mainWindow.Hide()
+			mainWindow = nil // Clear reference so we create a new one next time
+		})
+		
+		// Show and bring to front
+		logger.Log("Showing main window")
+		mainWindow.Show()
+		mainWindow.RequestFocus()
+	})
 }
 
 func showStatusDialog() {
@@ -2460,11 +2547,14 @@ dbswitcher --config-dir /path # Set custom config directory`)
 		currentStatus = getMariaDBStatus()
 		updateStatusCard(statusCardRef)
 
-		// Set up close handler
+		// Set up close handler to minimize to tray
 		mainWindow.SetCloseIntercept(func() {
-			logger.Log("Application closing")
-			logger.Close()
-			mainWindow.Close()
+			logger.Log("Main window hiding to system tray")
+			mainWindow.Hide()
+			// Start system tray if not already running
+			if !systrayRunning {
+				go createSystemTray()
+			}
 		})
 
 		mainWindow.ShowAndRun()
@@ -2498,7 +2588,9 @@ func createMainMenu() *fyne.MainMenu {
 			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Run in System Tray", func() {
 				mainWindow.Hide()
-				go createSystemTray()
+				if !systrayRunning {
+					go createSystemTray()
+				}
 			}),
 		),
 		fyne.NewMenu("Help",
