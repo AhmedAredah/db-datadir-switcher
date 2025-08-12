@@ -25,6 +25,7 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/getlantern/systray"
+	"github.com/zalando/go-keyring"
 )
 
 // Configuration structure
@@ -107,6 +108,63 @@ func (l *Logger) Close() {
 	}
 }
 
+// Keyring service constants
+const (
+	keyringService = "DBSwitcher"
+	keyringAccount = "mysql_credentials"
+)
+
+// Save credentials to system keyring
+func saveCredentialsToKeyring(creds MySQLCredentials) error {
+	// Serialize credentials to JSON
+	data, err := json.Marshal(creds)
+	if err != nil {
+		return fmt.Errorf("failed to marshal credentials: %v", err)
+	}
+	
+	// Store in system keyring
+	err = keyring.Set(keyringService, keyringAccount, string(data))
+	if err != nil {
+		return fmt.Errorf("failed to save to keyring: %v", err)
+	}
+	
+	logger.Log("Credentials saved to system keyring")
+	return nil
+}
+
+// Load credentials from system keyring
+func loadCredentialsFromKeyring() (*MySQLCredentials, error) {
+	// Retrieve from system keyring
+	data, err := keyring.Get(keyringService, keyringAccount)
+	if err != nil {
+		if err == keyring.ErrNotFound {
+			return nil, nil // No saved credentials
+		}
+		return nil, fmt.Errorf("failed to load from keyring: %v", err)
+	}
+	
+	// Deserialize credentials
+	var creds MySQLCredentials
+	err = json.Unmarshal([]byte(data), &creds)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal credentials: %v", err)
+	}
+	
+	logger.Log("Credentials loaded from system keyring")
+	return &creds, nil
+}
+
+// Delete credentials from system keyring
+func deleteCredentialsFromKeyring() error {
+	err := keyring.Delete(keyringService, keyringAccount)
+	if err != nil && err != keyring.ErrNotFound {
+		return fmt.Errorf("failed to delete from keyring: %v", err)
+	}
+	
+	logger.Log("Credentials deleted from system keyring")
+	return nil
+}
+
 // Create a dialog to get MySQL credentials from user
 func showCredentialsDialog(parent fyne.Window, onSuccess func(creds MySQLCredentials), onCancel func()) {
 	// Create form fields
@@ -140,9 +198,12 @@ func showCredentialsDialog(parent fyne.Window, onSuccess func(creds MySQLCredent
 		portEntry.SetText("3306")
 	}
 	
-	// Remember credentials checkbox
-	rememberCheck := widget.NewCheck("Remember credentials for this session", nil)
-	rememberCheck.SetChecked(true)
+	// Remember credentials checkbox options
+	rememberSessionCheck := widget.NewCheck("Remember for this session", nil)
+	rememberSessionCheck.SetChecked(true)
+	
+	rememberPermanentCheck := widget.NewCheck("Save credentials permanently (secure storage)", nil)
+	rememberPermanentCheck.SetChecked(savedCredentials != nil)
 	
 	// Create form
 	items := []*widget.FormItem{
@@ -150,7 +211,8 @@ func showCredentialsDialog(parent fyne.Window, onSuccess func(creds MySQLCredent
 		widget.NewFormItem("Password", passwordEntry),
 		widget.NewFormItem("Host", hostEntry),
 		widget.NewFormItem("Port", portEntry),
-		widget.NewFormItem("", rememberCheck),
+		widget.NewFormItem("", rememberSessionCheck),
+		widget.NewFormItem("", rememberPermanentCheck),
 	}
 	
 	// Create dialog with custom buttons
@@ -175,9 +237,24 @@ func showCredentialsDialog(parent fyne.Window, onSuccess func(creds MySQLCredent
 					creds.Port = "3306"
 				}
 				
-				// Save credentials if requested
-				if rememberCheck.Checked {
+				// Save credentials for session if requested
+				if rememberSessionCheck.Checked {
 					savedCredentials = &creds
+				}
+				
+				// Save credentials permanently if requested
+				if rememberPermanentCheck.Checked {
+					if err := saveCredentialsToKeyring(creds); err != nil {
+						logger.Log("Failed to save credentials to keyring: %v", err)
+						dialog.ShowError(fmt.Errorf("Failed to save credentials: %v", err), parent)
+					} else {
+						savedCredentials = &creds
+					}
+				} else if !rememberPermanentCheck.Checked && savedCredentials != nil {
+					// If unchecked, remove saved credentials
+					if err := deleteCredentialsFromKeyring(); err != nil {
+						logger.Log("Failed to delete credentials from keyring: %v", err)
+					}
 				}
 				
 				onSuccess(creds)
@@ -283,6 +360,14 @@ func init() {
 	logger = NewLogger()
 	loadConfig()
 	scanForConfigs()
+	
+	// Load saved credentials from keyring
+	if creds, err := loadCredentialsFromKeyring(); err != nil {
+		logger.Log("Failed to load saved credentials: %v", err)
+	} else if creds != nil {
+		savedCredentials = creds
+		logger.Log("Loaded saved credentials for user: %s", creds.Username)
+	}
 }
 
 func loadConfig() {
@@ -1530,7 +1615,13 @@ func createCredentialsMenu() *fyne.MenuItem {
 				}),
 				widget.NewButton("Clear Credentials", func() {
 					savedCredentials = nil
-					dialog.ShowInformation("Success", "Credentials cleared", window)
+					// Also remove from keyring
+					if err := deleteCredentialsFromKeyring(); err != nil {
+						logger.Log("Failed to delete credentials from keyring: %v", err)
+						dialog.ShowError(fmt.Errorf("Failed to clear saved credentials: %v", err), window)
+					} else {
+						dialog.ShowInformation("Success", "Credentials cleared from memory and secure storage", window)
+					}
 					window.Close()
 				}),
 				widget.NewButton("Test Connection", func() {
