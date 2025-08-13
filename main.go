@@ -1549,9 +1549,10 @@ func startMariaDBWithConfig(configFile string) error {
 	
 	// Platform-specific configuration
 	if runtime.GOOS == "windows" {
-		// Don't hide window initially for debugging
+		// Use CREATE_NEW_PROCESS_GROUP to detach process from parent
 		cmd.SysProcAttr = &syscall.SysProcAttr{
-			HideWindow: false, // Changed to false for debugging
+			HideWindow:    true, // Hide console window
+			CreationFlags: 0x00000200, // CREATE_NEW_PROCESS_GROUP - allows process to survive parent termination
 		}
 	}
 	
@@ -1566,35 +1567,18 @@ func startMariaDBWithConfig(configFile string) error {
 	
 	logger.Log("Process started with PID: %d", cmd.Process.Pid)
 	
-	// Monitor the process for a short time to catch immediate failures
-	processExited := make(chan bool)
-	go func() {
-		cmd.Wait()
-		processExited <- true
-	}()
-	
-	// Wait for either process to stabilize or exit
-	select {
-	case <-processExited:
-		// Process exited immediately - this is an error
-		stdoutStr := stdout.String()
-		stderrStr := stderr.String()
-		logger.Log("ERROR: MariaDB process exited immediately")
-		if stdoutStr != "" {
-			logger.Log("Stdout: %s", stdoutStr)
-		}
-		if stderrStr != "" {
-			logger.Log("Stderr: %s", stderrStr)
-		}
-		
-		// Parse error for common issues
-		errorMsg := parseMariaDBError(stderrStr + stdoutStr)
-		return fmt.Errorf("MariaDB failed to start: %s", errorMsg)
-		
-	case <-time.After(5 * time.Second):
-		// Process is still running after 5 seconds - good sign
-		logger.Log("Process appears to be running after 5 seconds")
+	// Release the process so it's detached from parent and can survive parent termination
+	err = cmd.Process.Release()
+	if err != nil {
+		logger.Log("WARNING: Could not release process: %v", err)
+		// Continue anyway - the process group flag should still work
+	} else {
+		logger.Log("Process successfully detached from parent")
 	}
+	
+	// Brief wait to allow process to initialize before verification
+	logger.Log("Waiting 3 seconds for MariaDB to initialize...")
+	time.Sleep(3 * time.Second)
 	
 	// Additional verification - try to connect
 	logger.Log("Verifying MariaDB is accessible...")
@@ -2039,7 +2023,21 @@ func updateTrayIcon() {
 
 	if currentStatus.IsRunning {
 		systray.SetTitle("DBSwitcher ✓")
-		systray.SetTooltip(fmt.Sprintf("MariaDB Running (%s - Port %s)", currentStatus.ConfigName, currentStatus.Port))
+		// Sanitize tooltip text to prevent systray errors
+		configName := currentStatus.ConfigName
+		port := currentStatus.Port
+		if configName == "" {
+			configName = "Unknown"
+		}
+		if port == "" {
+			port = "Unknown"
+		}
+		tooltip := fmt.Sprintf("MariaDB Running (%s - Port %s)", configName, port)
+		// Limit tooltip length to prevent Windows systray issues
+		if len(tooltip) > 127 {
+			tooltip = tooltip[:124] + "..."
+		}
+		systray.SetTooltip(tooltip)
 	} else {
 		systray.SetTitle("DBSwitcher ✗")
 		systray.SetTooltip("MariaDB Stopped")
