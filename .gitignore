@@ -1,0 +1,66 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+dbswitcher
+dbswitcher_new
+dbswitcher_new.exe
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+coverage.html
+coverage.out
+
+# Go workspace file
+go.work
+
+# Build directories
+build/
+dist/
+artifacts/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Configuration files (sensitive)
+config.local.*
+.env
+.env.local
+
+# Backup files
+main_original_backup.go
+main.go.old
+
+# Release files
+*.tar.gz
+*.zip
+checksums.sha256
+
+# Profile files
+cpu.prof
+mem.prof

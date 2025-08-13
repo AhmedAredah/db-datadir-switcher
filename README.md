@@ -1,192 +1,415 @@
-# DB DataDir Switcher
+# DBSwitcher - MariaDB Configuration Manager
 
-A lightweight system tray utility for seamlessly switching database data directories between internal and external storage locations.
+[![Build Status](https://github.com/AhmedAredah/MariaDBSwitcher/workflows/Build/badge.svg)](https://github.com/AhmedAredah/MariaDBSwitcher/actions)
+[![Release](https://img.shields.io/github/v/release/AhmedAredah/MariaDBSwitcher)](https://github.com/AhmedAredah/MariaDBSwitcher/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/go-%3E%3D%201.19-blue.svg)](https://golang.org/)
 
-## Overview
+A powerful, cross-platform tool for managing multiple MariaDB/MySQL configurations with an intuitive GUI and comprehensive CLI interface.
 
-DB DataDir Switcher enables database administrators and developers to easily switch between multiple data storage locations without manual configuration changes or data migration. Perfect for scenarios requiring:
-
-- Development/production data separation
-- External drive utilization for large datasets
-- Quick switching between different database instances
-- Backup and recovery workflows
+![DBSwitcher Screenshot](docs/screenshot.png)
 
 ## Features
 
-- **System Tray Integration**: Runs quietly in the background with easy access via system tray
-- **Hot-Swapping**: Switch data directories without data loss or corruption
-- **Real-time Monitoring**: Live status updates showing current configuration and database state
-- **Multiple Storage Support**: Configure internal and external storage locations
-- **Process Management**: Built-in start/stop controls for database services
-- **Configuration Detection**: Automatically detects current running configuration
+### Configuration Management
 
-## Requirements
+- **Multiple Configurations**: Manage unlimited MariaDB configurations
+- **Easy Switching**: Switch between configurations with a single command/click
+- **Auto-Detection**: Automatically detects existing MariaDB installations
+- **Configuration Validation**: Validates configurations before starting
 
-### Current (Windows)
-- Windows 10/11
-- PowerShell 5.1 or higher
-- MariaDB 10.x/11.x or MySQL 5.7/8.0
-- Administrator privileges (for service management)
+### Multiple Interfaces
 
-### Planned Support
-- macOS 11+ (Big Sur and later)
-- Linux (Ubuntu 20.04+, RHEL 8+, Debian 11+)
+- **GUI Application**: Modern, user-friendly graphical interface
+- **Command Line Interface**: Full-featured CLI for automation and scripts
+- **System Tray**: Lightweight system tray integration for quick access
+- **Cross-Platform**: Windows, Linux, and macOS support
+
+### Security & Credentials
+
+- **Secure Storage**: Credentials stored safely using system keyring
+- **Flexible Authentication**: Support for password and passwordless connections
+- **Session Management**: Remember credentials for the current session
+- **Connection Testing**: Built-in connection validation
+
+### Advanced Features
+
+- **Real-time Monitoring**: Live status updates and process monitoring
+- **Port Detection**: Intelligent port detection using multiple methods
+- **Process Management**: Safe start/stop with proper cleanup
+- **Logging**: Comprehensive logging for troubleshooting
+- **Configuration Editor**: Built-in editor integration
 
 ## Installation
 
-### Windows
+### Download Pre-built Binaries
 
-1. Clone the repository:
+Download the latest release for your platform from the [Releases](https://github.com/AhmedAredah/MariaDBSwitcher/releases) page:
+
+- **Windows**: `dbswitcher-windows-amd64.exe`
+- **Linux**: `dbswitcher-linux-amd64`
+- **macOS**: `dbswitcher-darwin-amd64`
+
+### Build from Source
+
 ```bash
-git clone https://github.com/yourusername/db-datadir-switcher.git
-cd db-datadir-switcher
+# Clone the repository
+git clone https://github.com/AhmedAredah/MariaDBSwitcher.git
+cd MariaDBSwitcher
+
+# Build for your platform
+go build -ldflags "-s -w" -o dbswitcher main.go
+
+# Or build for all platforms
+make build-all
 ```
 
-2. Configure your database paths in the configuration files:
-   - Edit `my-internal.ini` for internal storage configuration
-   - Edit `my-external.ini` for external storage configuration
+### Requirements
 
-3. Update paths in `MariaDBTrayMonitor.ps1`:
-```powershell
-$CONFIG_PATH = "C:\AredahScripts\MariaDBSwitcher"  # Your installation path
-$EXTERNAL_DRIVE = "Z:"  # Your external drive letter
-$MARIADB_BIN = "C:\Program Files\MariaDB 11.8\bin"  # Your MariaDB installation
-```
+- Go 1.19 or later (for building from source)
+- MariaDB/MySQL installation
+- GTK3 development libraries (Linux GUI)
 
-4. Run the application:
+## Quick Start
+
+### GUI Mode (Default)
+
 ```bash
-runSwitcher.bat
+# Launch GUI
+./dbswitcher
+# or explicitly
+./dbswitcher gui
 ```
 
-Or run directly with PowerShell:
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File MariaDBTrayMonitor.ps1
+### Command Line Usage
+
+```bash
+# List available configurations
+./dbswitcher list
+
+# Check current status
+./dbswitcher status
+
+# Start with a specific configuration
+./dbswitcher start production
+
+# Switch to another configuration
+./dbswitcher switch development
+
+# Stop MariaDB
+./dbswitcher stop
+
+# Run in system tray
+./dbswitcher tray
+
+# Show help
+./dbswitcher help
 ```
 
 ## Configuration
 
-### Configuration Files
+### Configuration Directory
 
-#### my-internal.ini
-Defines the database configuration for internal storage:
+DBSwitcher stores configurations in platform-specific directories:
+
+- **Windows**: `%APPDATA%\DBSwitcher\configs`
+- **Linux**: `~/.config/DBSwitcher`
+- **macOS**: `~/Library/Application Support/DBSwitcher`
+
+### Configuration File Format
+
+Create `.ini` or `.cnf` files in the configuration directory:
+
 ```ini
 [mysqld]
-datadir=C:/Program Files/MariaDB 11.8/data
-port=3306
-# Additional MariaDB/MySQL settings...
+# Basic settings
+port = 3306
+datadir = /path/to/data/directory
+
+# Optional: Custom socket (Unix systems)
+socket = /path/to/mysql.sock
+
+# Optional: Additional MariaDB settings
+innodb_buffer_pool_size = 128M
+max_connections = 100
+
+# DBSwitcher metadata (optional)
+[dbswitcher]
+description = "Production Database Server"
 ```
 
-#### my-external.ini
-Defines the database configuration for external storage:
+### Example Configurations
+
+#### Production Configuration (`production.ini`)
+
 ```ini
 [mysqld]
-datadir=Z:/MariaDB/data
-port=3306
-# Additional MariaDB/MySQL settings...
+port = 3306
+datadir = /var/lib/mysql/production
+innodb_buffer_pool_size = 1G
+max_connections = 200
+
+[dbswitcher]
+description = "Production server with optimized settings"
 ```
 
-### Important Settings
+#### Development Configuration (`development.ini`)
 
-| Setting | Description | Default |
+```ini
+[mysqld]
+port = 3307
+datadir = /var/lib/mysql/development
+innodb_buffer_pool_size = 256M
+max_connections = 50
+
+[dbswitcher]
+description = "Development server for testing"
+```
+
+## Interface Guide
+
+### GUI Features
+
+- **Status Dashboard**: Real-time MariaDB status and configuration info
+- **Quick Actions**: Start/stop with dropdown configuration selection
+- **Configuration Manager**: Full configuration management with editing
+- **System Tray**: Optional system tray mode with quick access menu
+- **Settings**: Appearance customization and credential management
+
+### CLI Commands
+
+| Command | Description | Example |
 |---------|-------------|---------|
-| `datadir` | Database data directory path | Varies by configuration |
-| `port` | Database server port | 3306 |
-| `innodb_buffer_pool_size` | InnoDB buffer pool size | 8122M |
+| `list` | Show all configurations | `dbswitcher list` |
+| `status` | Display current MariaDB status | `dbswitcher status` |
+| `start <config>` | Start with specified configuration | `dbswitcher start production` |
+| `switch <config>` | Switch to different configuration | `dbswitcher switch development` |
+| `stop` | Stop running MariaDB instance | `dbswitcher stop` |
+| `gui` | Launch graphical interface | `dbswitcher gui` |
+| `tray` | Run in system tray mode | `dbswitcher tray` |
+| `version` | Show version information | `dbswitcher version` |
+| `help` | Display help information | `dbswitcher help` |
 
-## Usage
+### System Tray Menu
 
-### System Tray Operations
+- **Show**: Open main window
+- **Status**: Quick status dialog
+- **Start with Config**: Dynamic menu of available configurations
+- **Stop MariaDB**: Stop current instance
+- **Settings/Logs/About**: Quick access to utilities
+- **Exit**: Close application
 
-- **Double-click**: Open configuration switcher dialog
-- **Right-click**: Access context menu
-  - Show Status: Display current database status
-  - Switch Configuration: Toggle between internal/external storage
-  - Stop MariaDB: Safely stop the database service
-  - Refresh: Update status display
-  - Exit: Close the application
+## Advanced Usage
 
-### Status Indicators
+### Environment Variables
 
-- **Green/Info Icon**: Database running
-- **Yellow/Warning Icon**: Database stopped
-- **Tooltip**: Shows current configuration (Internal/External)
+```bash
+# Custom configuration directory
+export DBSWITCHER_CONFIG_DIR="/custom/config/path"
 
-## Architecture
+# Custom MariaDB binary path
+export DBSWITCHER_MARIADB_BIN="/custom/mariadb/bin"
 
+# Enable debug logging
+export DBSWITCHER_DEBUG=1
 ```
-db-datadir-switcher/
-├── MariaDBTrayMonitor.ps1    # Main application logic (Windows)
-├── my-internal.ini            # Internal storage configuration
-├── my-external.ini            # External storage configuration
-├── runSwitcher.bat           # Windows launcher
-└── README.md                 # Documentation
+
+### Automation & Scripting
+
+```bash
+#!/bin/bash
+# Example: Automated database switching script
+
+# Switch to maintenance configuration
+./dbswitcher switch maintenance
+
+# Run maintenance tasks
+echo "Running maintenance..."
+sleep 10
+
+# Switch back to production
+./dbswitcher switch production
+
+echo "Maintenance completed"
 ```
 
-## Safety Features
+### Integration with CI/CD
 
-- Pre-switch validation of data directories
-- Automatic detection of missing critical files
-- Graceful shutdown before configuration switches
-- Configuration file integrity checks
-- Process state verification
+```yaml
+# Example GitHub Actions step
+- name: Switch to test database
+  run: |
+    dbswitcher stop
+    dbswitcher start testing
+    dbswitcher status
+```
+
+## Development
+
+### Architecture
+
+```bash
+MariaDBSwitcher/
+├── core/           # Business logic and data management
+│   ├── config.go   # Configuration management
+│   ├── mariadb.go  # MariaDB operations
+│   ├── credentials.go # Credential management
+│   └── ...
+├── gui/            # Graphical user interface
+│   ├── app.go      # Main application
+│   ├── statuscard.go # Status monitoring
+│   ├── configcard.go # Configuration management
+│   └── ...
+├── cli/            # Command-line interface
+│   └── commands.go # CLI command implementations
+└── main.go         # Application entry point
+```
+
+### Building
+
+#### Development Build
+
+```bash
+go build -o dbswitcher main.go
+```
+
+#### Production Build
+
+```bash
+# With optimization
+go build -ldflags "-s -w" -o dbswitcher main.go
+
+# With version information
+go build -ldflags "-s -w -X main.Version=0.0.1" -o dbswitcher main.go
+```
+
+#### Cross-Platform Build
+
+```bash
+# Windows
+GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o dbswitcher-windows-amd64.exe main.go
+
+# Linux
+GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o dbswitcher-linux-amd64 main.go
+
+# macOS
+GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w" -o dbswitcher-darwin-amd64 main.go
+```
+
+### Dependencies
+
+- **[fyne.io/fyne/v2](https://fyne.io/)** - GUI framework
+- **[getlantern/systray](https://github.com/getlantern/systray)** - System tray support
+- **[zalando/go-keyring](https://github.com/zalando/go-keyring)** - Secure credential storage
+
+## System Requirements
+
+### Minimum Requirements
+
+- **OS**: Windows 10, Linux (GTK3), macOS 10.14
+- **Memory**: 64MB RAM
+- **Storage**: 50MB available space
+- **MariaDB/MySQL**: Any version with standard tools
+
+### Supported Platforms
+
+- Windows (10, 11)
+- Linux (Ubuntu, Debian, CentOS, Fedora, Arch)
+- macOS (10.14+)
+- FreeBSD (experimental)
 
 ## Troubleshooting
 
-### Database Won't Start After Switch
+### Common Issues
 
-1. Verify the data directory exists and contains valid database files
-2. Check that the `mysql` system database exists in the target directory
-3. Ensure proper permissions on the data directory
-4. Review MariaDB/MySQL error logs
+#### MariaDB Not Detected
 
-### External Drive Not Detected
+```bash
+# Check if MariaDB is in PATH
+which mysqld
 
-1. Confirm the external drive is mounted to the configured drive letter
-2. Verify the data directory path exists on the external drive
-3. Check that database files are present in the external location
+# Or specify custom path
+export DBSWITCHER_MARIADB_BIN="/custom/path/to/mariadb/bin"
+```
 
-### Configuration Not Switching
+#### Configuration Not Found
 
-1. Ensure MariaDB/MySQL process has fully stopped before switching
-2. Verify both configuration files are properly formatted
-3. Check for file permission issues
+```bash
+# Check configuration directory
+./dbswitcher list
 
-## Roadmap
+# Verify file permissions
+ls -la ~/.config/DBSwitcher/
+```
 
-- [ ] macOS support with menu bar integration
-- [ ] Linux support with system tray/app indicator
-- [ ] Support for PostgreSQL
-- [ ] Support for MongoDB
-- [ ] Configuration wizard/GUI
-- [ ] Automatic backup before switch
-- [ ] Multiple configuration profiles (>2)
-- [ ] Docker container support
-- [ ] Cloud storage integration
+#### Permission Issues
 
-## Contributing
+```bash
+# Linux/macOS: Ensure proper permissions
+sudo chown -R $USER ~/.config/DBSwitcher/
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+# Windows: Run as administrator if needed
+```
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'feat: add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+### Logging
 
-## License
+Check application logs for detailed troubleshooting:
+
+- **Windows**: `%APPDATA%\DBSwitcher\dbswitcher.log`
+- **Linux/macOS**: `~/.config/DBSwitcher/dbswitcher.log`
+
+Enable debug logging:
+
+```bash
+export DBSWITCHER_DEBUG=1
+./dbswitcher status
+```
+
+## 🤝 Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+### Development Setup
+
+```bash
+# Clone and setup
+git clone https://github.com/AhmedAredah/MariaDBSwitcher.git
+cd MariaDBSwitcher
+
+# Install dependencies
+go mod tidy
+
+# Run tests
+go test ./...
+
+# Run with development logging
+go run main.go status
+```
+
+### Reporting Issues
+
+Please use the [GitHub Issues](https://github.com/AhmedAredah/MariaDBSwitcher/issues) page to report bugs or request features.
+
+## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+## Author
+
+**Ahmed Aredah**
+
+- GitHub: [@AhmedAredah](https://github.com/AhmedAredah)
+- Email: <Ahmed.Aredah@gmail.com>
+
 ## Acknowledgments
 
-- Built for database administrators and developers who need flexible data storage management
-- Inspired by the need for seamless development/production data switching
-- Special thanks to the MariaDB and MySQL communities
-
-## Support
-
-For issues, questions, or suggestions, please open an issue on GitHub.
+- [Fyne](https://fyne.io/) for the excellent GUI framework
+- [Go](https://golang.org/) for the powerful programming language
+- MariaDB/MySQL communities for the amazing database systems
+- All contributors and users who help improve this tool
 
 ---
 
-**Note**: This tool modifies database configuration and manages database processes. Always ensure you have proper backups before switching configurations.
+⭐ **If you find DBSwitcher useful, please consider giving it a star on GitHub!**
+
+📥 **Download the latest release**: [GitHub Releases](https://github.com/AhmedAredah/MariaDBSwitcher/releases)
