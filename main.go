@@ -81,6 +81,8 @@ var (
 	statusCardRef	 *widget.Card
 	savedCredentials *MySQLCredentials
 	systrayRunning   bool
+	globalConfigSelect *widget.Select  // Global reference to dropdown in Quick Actions
+	globalConfigList   *widget.List    // Global reference to list in Configurations tab
 )
 
 // Logger for debugging
@@ -2749,6 +2751,7 @@ func createMainMenu() *fyne.MainMenu {
 		),
 		fyne.NewMenu("View",
 			fyne.NewMenuItem("Refresh", func() {
+				refreshConfigurations()
 				refreshMainUI()
 			}),
 			fyne.NewMenuItem("Logs", func() {
@@ -2856,7 +2859,7 @@ func createQuickActionsCard() *widget.Card {
 		configOptions = append(configOptions, cfg.Name)
 	}
 
-	configSelect := widget.NewSelect(configOptions, func(selected string) {
+	globalConfigSelect = widget.NewSelect(configOptions, func(selected string) {
 		// Find and start the selected config
 		for _, cfg := range availableConfigs {
 			if cfg.Name == selected {
@@ -2898,11 +2901,17 @@ func createQuickActionsCard() *widget.Card {
 			}
 		}
 	})
-	configSelect.PlaceHolder = "Select configuration..."
+	globalConfigSelect.PlaceHolder = "Select configuration..."
+
+	// Refresh button to reload configurations
+	refreshBtn := widget.NewButton("⟳", func() {
+		refreshConfigurations()
+	})
+	refreshBtn.Importance = widget.LowImportance
 
 	startBtn := widget.NewButton("Start", func() {
-		if configSelect.Selected != "" {
-			configSelect.OnChanged(configSelect.Selected)
+		if globalConfigSelect.Selected != "" {
+			globalConfigSelect.OnChanged(globalConfigSelect.Selected)
 		}
 	})
 
@@ -2986,10 +2995,56 @@ func createQuickActionsCard() *widget.Card {
 	})
 
 	return widget.NewCard("Quick Actions", "", container.NewVBox(
-		container.NewBorder(nil, nil, widget.NewLabel("Start with:"), startBtn, configSelect),
+		container.NewBorder(nil, nil, 
+			widget.NewLabel("Start with:"), 
+			container.NewHBox(refreshBtn, startBtn), 
+			globalConfigSelect),
 		container.NewGridWithColumns(2, stopBtn, restartBtn),
 		openFolderBtn,
 	))
+}
+
+func refreshConfigurations() {
+	// Save current selection from dropdown
+	var currentSelection string
+	if globalConfigSelect != nil {
+		currentSelection = globalConfigSelect.Selected
+	}
+	
+	// Rescan for configurations
+	scanForConfigs()
+	
+	// Update dropdown if it exists
+	if globalConfigSelect != nil {
+		newOptions := []string{}
+		for _, cfg := range availableConfigs {
+			newOptions = append(newOptions, cfg.Name)
+		}
+		globalConfigSelect.Options = newOptions
+		
+		// Restore selection if it still exists
+		for _, option := range newOptions {
+			if option == currentSelection {
+				globalConfigSelect.SetSelected(currentSelection)
+				break
+			}
+		}
+		
+		globalConfigSelect.Refresh()
+	}
+	
+	// Update config list if it exists
+	if globalConfigList != nil {
+		globalConfigList.Refresh()
+	}
+	
+	// Show notification
+	if fyneApp != nil {
+		fyne.CurrentApp().SendNotification(&fyne.Notification{
+			Title:   "Configurations Refreshed",
+			Content: fmt.Sprintf("Found %d configuration(s)", len(availableConfigs)),
+		})
+	}
 }
 
 func refreshMainUI() {
@@ -2997,7 +3052,9 @@ func refreshMainUI() {
 		// Use the UI-enabled version that can prompt for credentials
 		getMariaDBStatusWithUI(mainWindow, func(status MariaDBStatus) {
 			currentStatus = status
-			scanForConfigs()
+			
+			// Also refresh configurations
+			refreshConfigurations()
 			
 			// Refresh all UI components in the main UI thread
 			fyne.Do(func() {
@@ -3039,7 +3096,7 @@ func createConfigCard() fyne.CanvasObject {
 	var selectedConfig int = -1
 
 	// Create config list with better formatting
-	configList := widget.NewList(
+	globalConfigList = widget.NewList(
 		func() int { return len(availableConfigs) },
 		func() fyne.CanvasObject {
 			nameLabel := widget.NewLabel("Config Name")
@@ -3085,7 +3142,7 @@ func createConfigCard() fyne.CanvasObject {
 	)
 
 	// Handle selection
-	configList.OnSelected = func(id widget.ListItemID) {
+	globalConfigList.OnSelected = func(id widget.ListItemID) {
 		selectedConfig = id
 	}
 
@@ -3132,7 +3189,7 @@ func createConfigCard() fyne.CanvasObject {
 						dialog.ShowInformation("Success",
 							fmt.Sprintf("Started MariaDB with %s configuration\nPort: %s\nData: %s", 
 								config.Name, config.Port, config.DataDir), mainWindow)
-						configList.Refresh()
+						globalConfigList.Refresh()
 						updateStatusBar()
 					}
 				})
@@ -3153,7 +3210,7 @@ func createConfigCard() fyne.CanvasObject {
 						statusBar.SetText("Failed to stop MariaDB")
 					} else {
 						dialog.ShowInformation("Success", "MariaDB stopped successfully", mainWindow)
-						configList.Refresh()
+						globalConfigList.Refresh()
 						updateStatusBar()
 					}
 				})
@@ -3176,8 +3233,7 @@ func createConfigCard() fyne.CanvasObject {
 				func(confirm bool) {
 					if confirm {
 						os.Remove(cfg.Path)
-						scanForConfigs()
-						configList.Refresh()
+						refreshConfigurations()
 					}
 				}, mainWindow)
 		}
@@ -3188,8 +3244,7 @@ func createConfigCard() fyne.CanvasObject {
 	})
 
 	refreshBtn := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-		refreshMainUI()
-		configList.Refresh()
+		refreshConfigurations()
 		updateStatusBar()
 	})
 
@@ -3229,7 +3284,7 @@ Current Status: `, config.ConfigPath, len(availableConfigs))
 			infoLabel,
 		),
 		nil, nil,
-		configList,
+		globalConfigList,
 	)
 
 	return content
