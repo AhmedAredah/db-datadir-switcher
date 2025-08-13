@@ -1555,9 +1555,7 @@ func startMariaDBWithConfig(configFile string) error {
 			CreationFlags: 0x00000200, // CREATE_NEW_PROCESS_GROUP - allows process to survive parent termination
 		}
 	}
-	
-	logger.Log("Executing command: %s %s", mysqldPath, strings.Join(args, " "))
-	
+		
 	// Start the process
 	err = cmd.Start()
 	if err != nil {
