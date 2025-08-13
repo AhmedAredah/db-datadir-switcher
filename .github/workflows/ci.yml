@@ -1,10 +1,12 @@
 name: CI
 
 on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
+  # Automatic triggers disabled - run manually only
+  # push:
+  #   branches: [ main, develop ]
+  # pull_request:
+  #   branches: [ main ]
+  workflow_dispatch:
 
 env:
   GO_VERSION: '1.21'
@@ -38,7 +40,7 @@ jobs:
         xcode-select --install || true
 
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cache/go-build

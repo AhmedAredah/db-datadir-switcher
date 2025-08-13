@@ -1,15 +1,17 @@
 name: Build and Release
 
 on:
-  push:
-    tags:
-      - 'v*'
-    branches:
-      - main
-      - develop
-  pull_request:
-    branches:
-      - main
+  # Automatic triggers disabled - run manually only
+  # push:
+  #   tags:
+  #     - 'v*'
+  #   branches:
+  #     - main
+  #     - develop
+  # pull_request:
+  #   branches:
+  #     - main
+  workflow_dispatch:
 
 env:
   GO_VERSION: '1.21'
@@ -63,7 +65,7 @@ jobs:
         xcode-select --install || true
 
     - name: Cache Go modules
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cache/go-build
@@ -118,7 +120,7 @@ jobs:
         ./${{ matrix.artifact_name }} version || echo "Binary test completed"
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.artifact_name }}
         path: ${{ matrix.artifact_name }}
@@ -140,7 +142,7 @@ jobs:
         fetch-depth: 0
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: artifacts/
 
