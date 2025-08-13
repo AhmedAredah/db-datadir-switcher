@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -142,4 +143,20 @@ func SetCredentialsDefaults(creds *MySQLCredentials) {
 	if creds.Port == "" {
 		creds.Port = "3306"
 	}
+}
+
+// IsCredentialError checks if an error is related to credential authentication
+func IsCredentialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	errStr := strings.ToLower(err.Error())
+	// Check for common MySQL authentication errors
+	return strings.Contains(errStr, "access denied") ||
+		   strings.Contains(errStr, "authentication") ||
+		   strings.Contains(errStr, "password") ||
+		   strings.Contains(errStr, "user") ||
+		   strings.Contains(errStr, "login") ||
+		   strings.Contains(errStr, "credentials")
 }

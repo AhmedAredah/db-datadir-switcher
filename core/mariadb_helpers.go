@@ -176,15 +176,6 @@ func ParseMariaDBError(errorOutput string) string {
 	return "Unknown error - check logs for details"
 }
 
-// QueryMariaDBVariable queries a MariaDB system variable
-func QueryMariaDBVariable(variable string) string {
-	AppLogger.Log("Querying MariaDB variable: %s", variable)
-	
-	// This is a simplified version - in production you'd need credentials
-	// For now, return empty string if we can't query
-	return ""
-}
-
 // ExecMySQLQueryWithCredentials executes a MySQL query with provided credentials
 func ExecMySQLQueryWithCredentials(variable string, creds MySQLCredentials) string {
 	mysqlPath := filepath.Join(AppConfig.MariaDBBin, "mysql")

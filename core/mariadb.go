@@ -196,20 +196,180 @@ func extractConfigFromCmdLine(cmdLine string) string {
 
 // getCurrentPort attempts to determine the port MariaDB is running on
 func getCurrentPort() string {
-	// Try to query the running instance for the port
-	// This is a simplified version - in a real implementation you might query the database
-	// For now, check common ports
-	commonPorts := []string{"3306", "3307", "3308", "3309"}
+	// Method 1: Try to extract port from process command line arguments
+	if port := extractPortFromCmdLine(); port != "" {
+		AppLogger.Log("DEBUG: Found port %s from command line arguments", port)
+		return port
+	}
+
+	// Method 2: Try to query the database directly
+	if port := queryDatabasePort(); port != "" {
+		AppLogger.Log("DEBUG: Found port %s from database query", port)
+		return port
+	}
+
+	// Method 3: Check netstat output for MariaDB/MySQL processes
+	if port := getPortFromNetstat(); port != "" {
+		AppLogger.Log("DEBUG: Found port %s from netstat", port)
+		return port
+	}
+
+	// Method 4: Check common ports in order of likelihood
+	commonPorts := []string{"3306", "3307", "3308", "3309", "3310"}
 	
 	for _, port := range commonPorts {
 		if IsPortListening(port) {
-			AppLogger.Log("DEBUG: Found MariaDB listening on port %s", port)
+			AppLogger.Log("DEBUG: Found service listening on port %s", port)
 			return port
 		}
 	}
 	
 	AppLogger.Log("DEBUG: Could not determine port, defaulting to 3306")
 	return "3306" // Default fallback
+}
+
+// extractPortFromCmdLine attempts to extract port from command line arguments
+func extractPortFromCmdLine() string {
+	processName := AppConfig.ProcessNames[runtime.GOOS]
+	if processName == "" {
+		processName = "mysqld"
+	}
+
+	_, cmdLine, found := FindProcessWithCmdLine(processName)
+	if !found {
+		return ""
+	}
+
+	// Look for --port= parameter
+	if idx := strings.Index(cmdLine, "--port="); idx != -1 {
+		start := idx + len("--port=")
+		end := strings.IndexAny(cmdLine[start:], " \t\n")
+		if end == -1 {
+			return strings.Trim(cmdLine[start:], "\"'")
+		}
+		return strings.Trim(cmdLine[start:start+end], "\"'")
+	}
+
+	// Look for --port parameter with space
+	parts := strings.Fields(cmdLine)
+	for i, part := range parts {
+		if part == "--port" && i+1 < len(parts) {
+			return strings.Trim(parts[i+1], "\"'")
+		}
+	}
+
+	return ""
+}
+
+// queryDatabasePort attempts to query the database for its port
+func queryDatabasePort() string {
+	// Try to connect with default credentials and query the port
+	creds := GetDefaultCredentials()
+	
+	mysqlPath := filepath.Join(AppConfig.MariaDBBin, "mysql")
+	if runtime.GOOS == "windows" {
+		mysqlPath += ".exe"
+	}
+
+	// Build command to query the port
+	args := []string{
+		"-h", creds.Host,
+		"-u", creds.Username,
+		"-e", "SHOW VARIABLES LIKE 'port';",
+		"--silent",
+		"--skip-column-names",
+	}
+
+	// Add password if provided
+	if creds.Password != "" {
+		args = append([]string{fmt.Sprintf("-p%s", creds.Password)}, args[3:]...)
+		args = append([]string{args[0], args[1], args[2]}, args[3:]...)
+	}
+
+	cmd := exec.Command(mysqlPath, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	// Parse output: should be "port\t3306"
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		parts := strings.Split(line, "\t")
+		if len(parts) >= 2 && parts[0] == "port" {
+			return strings.TrimSpace(parts[1])
+		}
+	}
+
+	return ""
+}
+
+// getPortFromNetstat attempts to find MariaDB port from netstat output
+func getPortFromNetstat() string {
+	var cmd *exec.Cmd
+	
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("netstat", "-ano")
+	default:
+		cmd = exec.Command("netstat", "-tlnp")
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+
+	processName := AppConfig.ProcessNames[runtime.GOOS]
+	if processName == "" {
+		processName = "mysqld"
+	}
+
+	// Get the PID of MariaDB process
+	pid, _, found := FindProcessWithCmdLine(processName)
+	if !found {
+		return ""
+	}
+	pidStr := strconv.Itoa(pid)
+
+	// Parse netstat output to find ports used by this PID
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "LISTENING") || strings.Contains(line, "LISTEN") {
+			fields := strings.Fields(line)
+			
+			// Windows format: TCP 0.0.0.0:3306 0.0.0.0:0 LISTENING 1234
+			// Unix format: tcp 0 0 0.0.0.0:3306 0.0.0.0:* LISTEN 1234/mysqld
+			
+			var localAddr, processInfo string
+			if runtime.GOOS == "windows" {
+				if len(fields) >= 5 {
+					localAddr = fields[1]
+					processInfo = fields[4]
+				}
+			} else {
+				if len(fields) >= 4 {
+					localAddr = fields[3]
+					if len(fields) >= 7 {
+						processInfo = fields[6]
+					}
+				}
+			}
+
+			// Check if this line matches our PID
+			if strings.Contains(processInfo, pidStr) {
+				// Extract port from address (format: ip:port)
+				if colonIdx := strings.LastIndex(localAddr, ":"); colonIdx != -1 {
+					port := localAddr[colonIdx+1:]
+					if port != "0" && len(port) > 0 {
+						return port
+					}
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // GetMariaDBVersion returns the MariaDB version
