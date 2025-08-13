@@ -71,18 +71,17 @@ func onTrayReady() {
 					MainWindow.Show()
 					MainWindow.RequestFocus()
 				} else {
-					// If no main window, create one
-					Run()
+					core.AppLogger.Error("Main window not initialized - this shouldn't happen")
 				}
 
 			case <-mStatus.ClickedCh:
 				// Show status dialog
 				core.AppLogger.Log("Show status clicked")
-				if MainWindow == nil {
-					Run()
-					time.Sleep(500 * time.Millisecond) // Give window time to initialize
+				if MainWindow != nil {
+					ShowStatusDialog()
+				} else {
+					core.AppLogger.Error("Cannot show status - main window not initialized")
 				}
-				ShowStatusDialog()
 
 			case <-mStop.ClickedCh:
 				// Stop MariaDB
@@ -115,11 +114,11 @@ func onTrayReady() {
 			case <-mAbout.ClickedCh:
 				// Show about dialog
 				core.AppLogger.Log("About clicked from tray")
-				if MainWindow == nil {
-					Run()
-					time.Sleep(500 * time.Millisecond) // Give window time to initialize
+				if MainWindow != nil {
+					ShowAbout()
+				} else {
+					core.AppLogger.Error("Cannot show about - main window not initialized")
 				}
-				ShowAbout()
 
 			case <-mExit.ClickedCh:
 				// Exit application

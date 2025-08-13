@@ -26,8 +26,9 @@ func main() {
 	// Parse command line arguments
 	if len(os.Args) < 2 {
 		// Default to GUI mode
-		core.AppLogger.Log("Starting application in GUI mode (no arguments provided)")
-		if err := gui.Run(); err != nil {
+		startMinimized := core.AppConfig.StartMinimized
+		core.AppLogger.Log("Starting application in GUI mode (no arguments provided), minimized: %t", startMinimized)
+		if err := gui.RunWithOptions(startMinimized); err != nil {
 			fmt.Printf("Error running GUI: %v\n", err)
 			fmt.Println("Use 'help' for CLI usage information")
 			os.Exit(1)
@@ -36,6 +37,17 @@ func main() {
 	}
 
 	command := os.Args[1]
+	
+	// Check for --minimized flag
+	if command == "--minimized" {
+		core.AppLogger.Log("Starting application in GUI mode (minimized)")
+		if err := gui.RunWithOptions(true); err != nil {
+			fmt.Printf("Error running GUI: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	
 	core.AppLogger.Log("Executing command: %s", command)
 	
 	cli := cli.NewCLI()

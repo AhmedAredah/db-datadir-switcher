@@ -10,6 +10,22 @@ type Config struct {
 	AutoDetected      bool              `json:"auto_detected"`
 	UseServiceControl bool              `json:"use_service_control"`
 	RequireElevation  bool              `json:"require_elevation"`
+	
+	// UI/Application Settings
+	AutoRefreshEnabled    bool   `json:"auto_refresh_enabled"`
+	RefreshIntervalSecs   int    `json:"refresh_interval_seconds"`
+	NotificationsEnabled  bool   `json:"notifications_enabled"`
+	StartMinimized        bool   `json:"start_minimized"`
+	AutoStartWithSystem   bool   `json:"auto_start_with_system"`
+	LogLevel              string `json:"log_level"`
+	
+	// Advanced Settings
+	ProcessTimeoutSecs    int  `json:"process_timeout_seconds"`
+	MaxRetryAttempts      int  `json:"max_retry_attempts"`
+	ConnectionTimeoutSecs int  `json:"connection_timeout_seconds"`
+	DebugMode             bool `json:"debug_mode"`
+	VerboseLogging        bool `json:"verbose_logging"`
+	BackgroundProcessing  bool `json:"background_processing"`
 }
 
 // MariaDBConfig represents a detected configuration file

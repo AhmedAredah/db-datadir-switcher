@@ -95,7 +95,7 @@ func TestMySQLConnection(creds MySQLCredentials) error {
 	// Add test query
 	args = append(args, "-e", "SELECT 1")
 	
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(AppConfig.ConnectionTimeoutSecs)*time.Second)
 	defer cancel()
 	
 	cmd := exec.CommandContext(ctx, mysqlPath, args...)
@@ -111,7 +111,7 @@ func TestMySQLConnection(creds MySQLCredentials) error {
 // InitCredentials loads saved credentials on startup
 func InitCredentials() {
 	if creds, err := LoadCredentialsFromKeyring(); err != nil {
-		AppLogger.Log("Failed to load saved credentials: %v", err)
+		AppLogger.Error("Failed to load saved credentials: %v", err)
 	} else if creds != nil {
 		SavedCredentials = creds
 		AppLogger.Log("Loaded saved credentials for user: %s", creds.Username)

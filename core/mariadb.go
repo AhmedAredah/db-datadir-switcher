@@ -37,11 +37,11 @@ func GetMariaDBStatus() MariaDBStatus {
 		status.ProcessID = pid
 		
 		// Log the command line for debugging
-		AppLogger.Log("DEBUG: Found MariaDB process with command line: %s", cmdLine)
+		AppLogger.Debug("Found MariaDB process with command line: %s", cmdLine)
 		
 		// Extract config file from command line
 		configFile := extractConfigFromCmdLine(cmdLine)
-		AppLogger.Log("DEBUG: Extracted config file: '%s'", configFile)
+		AppLogger.Debug(" Extracted config file: '%s'", configFile)
 		
 		if configFile != "" {
 			status.ConfigFile = configFile
@@ -52,26 +52,26 @@ func GetMariaDBStatus() MariaDBStatus {
 			// Find matching config in our list
 			for _, cfg := range AvailableConfigs {
 				normalizedCfgPath := filepath.Clean(cfg.Path)
-				AppLogger.Log("DEBUG: Comparing '%s' with '%s'", normalizedConfigFile, normalizedCfgPath)
+				AppLogger.Debug(" Comparing '%s' with '%s'", normalizedConfigFile, normalizedCfgPath)
 				
 				if normalizedCfgPath == normalizedConfigFile {
 					status.ConfigName = cfg.Name
 					status.Port = cfg.Port
 					status.DataPath = cfg.DataDir
-					AppLogger.Log("DEBUG: Matched config: %s, Port: %s", cfg.Name, cfg.Port)
+					AppLogger.Debug(" Matched config: %s, Port: %s", cfg.Name, cfg.Port)
 					break
 				}
 			}
 			
 			if status.ConfigName == "" {
-				AppLogger.Log("DEBUG: No matching config found for file: %s", configFile)
-				AppLogger.Log("DEBUG: Available configs:")
+				AppLogger.Debug("No matching config found for file: %s", configFile)
+				AppLogger.Debug(" Available configs:")
 				for _, cfg := range AvailableConfigs {
-					AppLogger.Log("DEBUG:   - %s: %s", cfg.Name, filepath.Clean(cfg.Path))
+					AppLogger.Debug("   - %s: %s", cfg.Name, filepath.Clean(cfg.Path))
 				}
 			}
 		} else {
-			AppLogger.Log("DEBUG: No config file found in command line")
+			AppLogger.Debug(" No config file found in command line")
 			// If no config file, try to get port from running instance
 			status.Port = getCurrentPort()
 		}
@@ -198,19 +198,19 @@ func extractConfigFromCmdLine(cmdLine string) string {
 func getCurrentPort() string {
 	// Method 1: Try to extract port from process command line arguments
 	if port := extractPortFromCmdLine(); port != "" {
-		AppLogger.Log("DEBUG: Found port %s from command line arguments", port)
+		AppLogger.Debug(" Found port %s from command line arguments", port)
 		return port
 	}
 
 	// Method 2: Try to query the database directly
 	if port := queryDatabasePort(); port != "" {
-		AppLogger.Log("DEBUG: Found port %s from database query", port)
+		AppLogger.Debug(" Found port %s from database query", port)
 		return port
 	}
 
 	// Method 3: Check netstat output for MariaDB/MySQL processes
 	if port := getPortFromNetstat(); port != "" {
-		AppLogger.Log("DEBUG: Found port %s from netstat", port)
+		AppLogger.Debug(" Found port %s from netstat", port)
 		return port
 	}
 
@@ -219,12 +219,12 @@ func getCurrentPort() string {
 	
 	for _, port := range commonPorts {
 		if IsPortListening(port) {
-			AppLogger.Log("DEBUG: Found service listening on port %s", port)
+			AppLogger.Debug(" Found service listening on port %s", port)
 			return port
 		}
 	}
 	
-	AppLogger.Log("DEBUG: Could not determine port, defaulting to 3306")
+	AppLogger.Debug(" Could not determine port, defaulting to 3306")
 	return "3306" // Default fallback
 }
 
@@ -429,13 +429,13 @@ func StartMariaDBWithConfig(configFile string) error {
 
 	// Validate config.MariaDBBin
 	if AppConfig.MariaDBBin == "" {
-		AppLogger.Log("ERROR: MariaDB binary path is empty!")
+		AppLogger.Error(" MariaDB binary path is empty!")
 		return fmt.Errorf("MariaDB binary path not configured")
 	}
 
 	// Check if binary directory exists
 	if !PathExists(AppConfig.MariaDBBin) {
-		AppLogger.Log("ERROR: MariaDB binary directory does not exist: %s", AppConfig.MariaDBBin)
+		AppLogger.Error(" MariaDB binary directory does not exist: %s", AppConfig.MariaDBBin)
 		return fmt.Errorf("MariaDB binary directory not found: %s", AppConfig.MariaDBBin)
 	}
 
@@ -445,7 +445,7 @@ func StartMariaDBWithConfig(configFile string) error {
 	
 	// Check if mysqld exists
 	if !PathExists(mysqldPath) {
-		AppLogger.Log("ERROR: mysqld not found at: %s", mysqldPath)
+		AppLogger.Error(" mysqld not found at: %s", mysqldPath)
 		
 		// Try mariadbd as alternative
 		mariadbdPath := filepath.Join(AppConfig.MariaDBBin, GetExecutableName("mariadbd"))
@@ -474,14 +474,14 @@ func StartMariaDBWithConfig(configFile string) error {
 
 	// Check if config file exists
 	if !PathExists(configFile) {
-		AppLogger.Log("ERROR: Configuration file not found: %s", configFile)
+		AppLogger.Error(" Configuration file not found: %s", configFile)
 		return fmt.Errorf("configuration file not found: %s", configFile)
 	}
 
 	// Get absolute path for config file
 	absConfigFile, err := filepath.Abs(configFile)
 	if err != nil {
-		AppLogger.Log("ERROR: Cannot get absolute path for config: %v", err)
+		AppLogger.Error(" Cannot get absolute path for config: %v", err)
 		return fmt.Errorf("cannot get absolute path for config: %v", err)
 	}
 	AppLogger.Log("Absolute config file path: %s", absConfigFile)
@@ -502,7 +502,7 @@ func StartMariaDBWithConfig(configFile string) error {
 		if !PathExists(configData.DataDir) {
 			AppLogger.Log("Data directory does not exist, creating: %s", configData.DataDir)
 			if err := os.MkdirAll(configData.DataDir, 0755); err != nil {
-				AppLogger.Log("ERROR: Failed to create data directory: %v", err)
+				AppLogger.Error(" Failed to create data directory: %v", err)
 				return fmt.Errorf("failed to create data directory: %v", err)
 			}
 		}
@@ -511,7 +511,7 @@ func StartMariaDBWithConfig(configFile string) error {
 		if isEmpty, _ := IsDirEmpty(configData.DataDir); isEmpty {
 			AppLogger.Log("Data directory is empty, needs initialization")
 			if err := InitializeDataDir(configData.DataDir); err != nil {
-				AppLogger.Log("ERROR: Failed to initialize data directory: %v", err)
+				AppLogger.Error(" Failed to initialize data directory: %v", err)
 				// Try alternative initialization
 				if err := InitializeDataDirAlternative(configData.DataDir, absConfigFile); err != nil {
 					return fmt.Errorf("failed to initialize data directory: %v", err)
@@ -520,7 +520,7 @@ func StartMariaDBWithConfig(configFile string) error {
 		} else {
 			// Check for critical files in data directory
 			if !ValidateDataDirectory(configData.DataDir) {
-				AppLogger.Log("WARNING: Data directory may be corrupted or incomplete")
+				AppLogger.Warn(" Data directory may be corrupted or incomplete")
 			}
 		}
 	}
@@ -542,7 +542,7 @@ func StartMariaDBWithConfig(configFile string) error {
 	// First, try to validate the config file syntax
 	AppLogger.Log("Validating configuration file syntax...")
 	if err := ValidateConfigFile(mysqldPath, absConfigFile); err != nil {
-		AppLogger.Log("WARNING: Config file validation failed: %v", err)
+		AppLogger.Warn(" Config file validation failed: %v", err)
 		// Continue anyway, as some versions don't support --validate-config
 	}
 
@@ -579,7 +579,7 @@ func StartMariaDBWithConfig(configFile string) error {
 	// Start the process
 	err = cmd.Start()
 	if err != nil {
-		AppLogger.Log("ERROR: Failed to start process: %v", err)
+		AppLogger.Error(" Failed to start process: %v", err)
 		return fmt.Errorf("failed to start MariaDB: %v", err)
 	}
 	
@@ -588,19 +588,26 @@ func StartMariaDBWithConfig(configFile string) error {
 	// Release the process so it's detached from parent and can survive parent termination
 	err = cmd.Process.Release()
 	if err != nil {
-		AppLogger.Log("WARNING: Could not release process: %v", err)
+		AppLogger.Warn(" Could not release process: %v", err)
 		// Continue anyway - the process group flag should still work
 	} else {
 		AppLogger.Log("Process successfully detached from parent")
 	}
 	
 	// Brief wait to allow process to initialize before verification
-	AppLogger.Log("Waiting 3 seconds for MariaDB to initialize...")
-	time.Sleep(3 * time.Second)
+	initWaitTime := 3
+	if AppConfig.ProcessTimeoutSecs > 10 {
+		initWaitTime = AppConfig.ProcessTimeoutSecs / 10 // Use 10% of process timeout for init wait
+	}
+	AppLogger.Info("Waiting %d seconds for MariaDB to initialize...", initWaitTime)
+	time.Sleep(time.Duration(initWaitTime) * time.Second)
 	
 	// Additional verification - try to connect
-	AppLogger.Log("Verifying MariaDB is accessible...")
-	maxRetries := 10
+	AppLogger.Info("Verifying MariaDB is accessible...")
+	maxRetries := AppConfig.MaxRetryAttempts
+	if maxRetries <= 0 {
+		maxRetries = 3 // fallback
+	}
 	for i := 0; i < maxRetries; i++ {
 		if IsMariaDBRunning() && IsPortListening(configData.Port) {
 			AppLogger.Log("MariaDB is running and accepting connections")
@@ -614,7 +621,7 @@ func StartMariaDBWithConfig(configFile string) error {
 	if !IsMariaDBRunning() {
 		stdoutStr := stdout.String()
 		stderrStr := stderr.String()
-		AppLogger.Log("ERROR: MariaDB process not found after startup")
+		AppLogger.Error(" MariaDB process not found after startup")
 		if stdoutStr != "" {
 			AppLogger.Log("Final stdout: %s", stdoutStr)
 		}
@@ -631,9 +638,16 @@ func StartMariaDBWithConfig(configFile string) error {
 	// Update global status
 	CurrentStatus = GetMariaDBStatus()
 	
-	AppLogger.Log("========================================")
-	AppLogger.Log("MARIADB STARTED SUCCESSFULLY")
-	AppLogger.Log("========================================")
+	AppLogger.Info("========================================")
+	AppLogger.Info("MARIADB STARTED SUCCESSFULLY")
+	AppLogger.Info("========================================")
+	
+	// Show success notification
+	if config := FindConfigByPath(absConfigFile); config != nil {
+		NotifyMariaDBStarted(config.Name)
+	} else {
+		NotifyMariaDBStarted("Unknown")
+	}
 	
 	return nil
 }

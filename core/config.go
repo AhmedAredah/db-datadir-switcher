@@ -43,6 +43,22 @@ func LoadConfig() {
 		},
 		UseServiceControl: false,
 		RequireElevation:  false,
+		
+		// Default UI/Application Settings
+		AutoRefreshEnabled:    true,
+		RefreshIntervalSecs:   5,
+		NotificationsEnabled:  true,
+		StartMinimized:        false,
+		AutoStartWithSystem:   false,
+		LogLevel:              "INFO",
+		
+		// Default Advanced Settings
+		ProcessTimeoutSecs:    30,
+		MaxRetryAttempts:      3,
+		ConnectionTimeoutSecs: 5,
+		DebugMode:             false,
+		VerboseLogging:        false,
+		BackgroundProcessing:  true,
 	}
 
 	// Set user config directory
@@ -52,7 +68,7 @@ func LoadConfig() {
 	configFile := GetConfigPath()
 	if data, err := os.ReadFile(configFile); err == nil {
 		if err := json.Unmarshal(data, &AppConfig); err != nil {
-			AppLogger.Log("Error parsing config: %v", err)
+			AppLogger.Error("Error parsing config: %v", err)
 		}
 	} else {
 		// Auto-detect and create config
@@ -231,4 +247,15 @@ Configuration Directory Location:
 		os.WriteFile(readmePath, []byte(readme), 0644)
 		AppLogger.Log("Created README file for config directory: %s", readmePath)
 	}
+}
+
+// FindConfigByPath finds a configuration by its file path
+func FindConfigByPath(path string) *MariaDBConfig {
+	normalizedPath := filepath.Clean(path)
+	for _, config := range AvailableConfigs {
+		if filepath.Clean(config.Path) == normalizedPath {
+			return &config
+		}
+	}
+	return nil
 }

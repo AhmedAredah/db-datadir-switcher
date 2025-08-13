@@ -50,7 +50,11 @@ func StopMySQLWithCredentials(creds MySQLCredentials) error {
 	// Wait for shutdown to complete
 	time.Sleep(3 * time.Second)
 	
-	AppLogger.Log("MySQL shutdown command executed successfully")
+	AppLogger.Info("MySQL shutdown command executed successfully")
+	
+	// Show notification
+	NotifyMariaDBStopped()
+	
 	return nil
 }
 
@@ -183,7 +187,7 @@ func ExecMySQLQueryWithCredentials(variable string, creds MySQLCredentials) stri
 		mysqlPath += ".exe"
 	}
 	
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(AppConfig.ConnectionTimeoutSecs)*time.Second)
 	defer cancel()
 	
 	// Build command with credentials

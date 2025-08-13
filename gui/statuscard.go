@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -81,4 +82,67 @@ func FindStatusCard() *widget.Card {
 		return nil
 	}
 	return StatusCardRef
+}
+
+var refreshTicker *time.Ticker
+var refreshDone chan bool
+
+// StartAutoRefresh starts the automatic status refresh based on user settings
+func StartAutoRefresh() {
+	// Stop any existing refresh
+	StopAutoRefresh()
+	
+	if !core.AppConfig.AutoRefreshEnabled {
+		core.AppLogger.Debug("Auto-refresh is disabled")
+		return
+	}
+	
+	core.AppLogger.Info("Starting auto-refresh with %d second interval", core.AppConfig.RefreshIntervalSecs)
+	
+	refreshTicker = time.NewTicker(time.Duration(core.AppConfig.RefreshIntervalSecs) * time.Second)
+	refreshDone = make(chan bool)
+	
+	go func() {
+		for {
+			select {
+			case <-refreshTicker.C:
+				if !core.AppConfig.AutoRefreshEnabled {
+					core.AppLogger.Debug("Auto-refresh disabled, stopping ticker")
+					return
+				}
+				
+				// Update status card if it exists
+				if card := FindStatusCard(); card != nil {
+					UpdateStatusCard(card)
+					core.AppLogger.Debug("Auto-refreshed status (interval: %ds)", core.AppConfig.RefreshIntervalSecs)
+				}
+			case <-refreshDone:
+				core.AppLogger.Debug("Auto-refresh stopped")
+				return
+			}
+		}
+	}()
+}
+
+// StopAutoRefresh stops the automatic refresh
+func StopAutoRefresh() {
+	if refreshTicker != nil {
+		refreshTicker.Stop()
+		refreshTicker = nil
+	}
+	if refreshDone != nil {
+		select {
+		case <-refreshDone:
+			// Already closed
+		default:
+			close(refreshDone)
+		}
+		refreshDone = nil
+	}
+}
+
+// RestartAutoRefresh restarts auto-refresh with new settings
+func RestartAutoRefresh() {
+	core.AppLogger.Debug("Restarting auto-refresh with new settings")
+	StartAutoRefresh()
 }
