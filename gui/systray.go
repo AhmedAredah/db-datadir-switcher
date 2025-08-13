@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"github.com/getlantern/systray"
 	"mariadb-monitor/core"
 )
@@ -68,8 +69,10 @@ func onTrayReady() {
 				// Show main window
 				core.AppLogger.Log("Show main window clicked")
 				if MainWindow != nil {
-					MainWindow.Show()
-					MainWindow.RequestFocus()
+					fyne.Do(func() {
+						MainWindow.Show()
+						MainWindow.RequestFocus()
+					})
 				} else {
 					core.AppLogger.Error("Main window not initialized - this shouldn't happen")
 				}
@@ -78,7 +81,9 @@ func onTrayReady() {
 				// Show status dialog
 				core.AppLogger.Log("Show status clicked")
 				if MainWindow != nil {
-					ShowStatusDialog()
+					fyne.Do(func() {
+						ShowStatusDialog()
+					})
 				} else {
 					core.AppLogger.Error("Cannot show status - main window not initialized")
 				}
@@ -99,12 +104,16 @@ func onTrayReady() {
 			case <-mSettings.ClickedCh:
 				// Open settings
 				core.AppLogger.Log("Settings clicked from tray")
-				ShowSettings()
+				fyne.Do(func() {
+					ShowSettings()
+				})
 
 			case <-mLogs.ClickedCh:
 				// Show logs
 				core.AppLogger.Log("View logs clicked from tray")
-				ShowLogs()
+				fyne.Do(func() {
+					ShowLogs()
+				})
 
 			case <-mOpenFolder.ClickedCh:
 				// Open config folder
@@ -115,7 +124,9 @@ func onTrayReady() {
 				// Show about dialog
 				core.AppLogger.Log("About clicked from tray")
 				if MainWindow != nil {
-					ShowAbout()
+					fyne.Do(func() {
+						ShowAbout()
+					})
 				} else {
 					core.AppLogger.Error("Cannot show about - main window not initialized")
 				}
@@ -125,6 +136,11 @@ func onTrayReady() {
 				core.AppLogger.Log("Exit clicked from tray")
 				core.AppLogger.Log("Application exiting")
 				core.AppLogger.Close()
+				if FyneApp != nil {
+					fyne.Do(func() {
+						FyneApp.Quit()
+					})
+				}
 				systray.Quit()
 
 			case <-time.After(100 * time.Millisecond):
